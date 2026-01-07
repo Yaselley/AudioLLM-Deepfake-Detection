@@ -1,0 +1,25 @@
+model:
+  # LLM Settings
+  llm_path: "Qwen/Qwen2-7B-Instruct" # or "meta-llama/Llama-2-7b-hf"
+  llm_type: "qwen2" # "qwen2", "qwen3", "llama"
+  
+  # Audio Encoder Settings
+  audio_encoder_path: "openai/whisper-large-v2" # or "facebook/wav2vec2-base", "microsoft/wavlm-base"
+  audio_encoder_type: "whisper" # "whisper", "wav2vec2", "wavlm"
+  freeze_audio_encoder: true
+  
+  # LoRA Settings
+  lora: true
+  lora_rank: 8
+
+data:
+  train_path: "data/train.jsonl"
+  val_path: "data/val.jsonl"
+
+train:
+  batch_size: 4
+  epochs: 5
+  lr: 1e-4
+  num_workers: 4
+
+output_dir: "output_v2"
