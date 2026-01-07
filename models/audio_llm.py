@@ -12,23 +12,9 @@ from transformers import (
     AutoModelForCausalLM
 )
 
-# Attempt to import specific tokenizers
-try:
-    from transformers import Qwen2Tokenizer
-except ImportError:
-    Qwen2Tokenizer = None
-
-try:
-    from transformers import Qwen3Tokenizer
-except ImportError:
-    Qwen3Tokenizer = None
-
 from .modeling_whisper import WhisperModel
 from .modeling_qwen2 import Qwen2ForCausalLM
-try:
-    from .modeling_qwen3 import Qwen3ForCausalLM
-except ImportError:
-    Qwen3ForCausalLM = None
+from .modeling_qwen3 import Qwen3ForCausalLM
 from .modeling_llama import LlamaForCausalLM
 
 class AudioDeepfakeLLM(nn.Module):
@@ -93,36 +79,19 @@ class AudioDeepfakeLLM(nn.Module):
             target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
             
         elif "qwen" in self.llm_type:
-            # Determine Tokenizer Class
-            if self.llm_type == "qwen3":
-                if Qwen3Tokenizer:
-                    TokenizerCls = Qwen3Tokenizer
-                elif Qwen2Tokenizer:
-                    logging.warning("Qwen3Tokenizer not found in transformers, falling back to Qwen2Tokenizer")
-                    TokenizerCls = Qwen2Tokenizer
-                else:
-                    logging.warning("Qwen3Tokenizer/Qwen2Tokenizer not found, falling back to AutoTokenizer")
-                    TokenizerCls = AutoTokenizer
-            else: # qwen2
-                if Qwen2Tokenizer:
-                    TokenizerCls = Qwen2Tokenizer
-                else:
-                    logging.warning("Qwen2Tokenizer not found, falling back to AutoTokenizer")
-                    TokenizerCls = AutoTokenizer
-            
-            self.tokenizer = TokenizerCls.from_pretrained(llm_path, use_fast=False, trust_remote_code=True)
-            
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_path, use_fast=False, trust_remote_code=True)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.padding_side = "right"
             self.end_sym = "<|endoftext|>" if not end_sym else end_sym
             
-            # Determine Model Class
+            # Choose Qwen Class
             if self.llm_type == "qwen3":
-                if Qwen3ForCausalLM:
+                try:
+                    from .modeling_qwen3 import Qwen2ForCausalLM as Qwen3ForCausalLM
                     model_cls = Qwen3ForCausalLM
-                else:
-                    logging.warning("Qwen3ForCausalLM not found in local models, using Qwen2ForCausalLM")
+                except ImportError:
+                    logging.warning("Could not import Qwen3 class, using Qwen2ForCausalLM")
                     model_cls = Qwen2ForCausalLM
             else:
                 model_cls = Qwen2ForCausalLM
