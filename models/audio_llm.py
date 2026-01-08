@@ -2,6 +2,8 @@ import logging
 import contextlib
 import torch
 import torch.nn as nn
+import sys
+import os
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoTokenizer, 
@@ -18,6 +20,9 @@ from .modeling_whisper import WhisperModel
 # from .modeling_qwen2 import Qwen2ForCausalLM
 # from .modeling_qwen3 import Qwen3ForCausalLM
 from .modeling_llama import LlamaForCausalLM
+
+# Add DeepFense path for custom modules if needed
+sys.path.append("/netscratch/yelkheir/DeepFense/DeepFense")
 
 class AudioDeepfakeLLM(nn.Module):
     @property
@@ -41,6 +46,7 @@ class AudioDeepfakeLLM(nn.Module):
         # Audio Args
         audio_encoder_path="",
         audio_encoder_type="whisper", # whisper, wav2vec2, wavlm
+        audio_encoder_source="huggingface", # huggingface, fairseq, unil
         freeze_audio_encoder=True,
         
         # Adapter config
@@ -48,9 +54,9 @@ class AudioDeepfakeLLM(nn.Module):
 
         # LoRA config
         lora=True,
-        lora_rank=8,
-        lora_alpha=32,
-        lora_dropout=0.1,
+        lora_rank=64,
+        lora_alpha=16,
+        lora_dropout=0.05,
         
         # Tokenizer config
         special_tokens=None, # List of strings to add to vocab
@@ -67,6 +73,7 @@ class AudioDeepfakeLLM(nn.Module):
         self.max_txt_len = max_txt_len
         self.low_resource = low_resource
         self.audio_encoder_type = audio_encoder_type.lower()
+        self.audio_encoder_source = audio_encoder_source.lower()
         self.llm_type = llm_type.lower()
 
         # ====================
@@ -159,7 +166,7 @@ class AudioDeepfakeLLM(nn.Module):
         # ====================
         # 2. Load Audio Encoder
         # ====================
-        logging.info(f'Loading {self.audio_encoder_type} from {audio_encoder_path}')
+        logging.info(f'Loading {self.audio_encoder_type} from {audio_encoder_path} (Source: {self.audio_encoder_source})')
         
         if self.audio_encoder_type == "whisper":
             self.audio_encoder = WhisperModel.from_pretrained(audio_encoder_path).encoder
@@ -167,12 +174,26 @@ class AudioDeepfakeLLM(nn.Module):
             self.feature_extractor = WhisperFeatureExtractor.from_pretrained(audio_encoder_path)
             
         elif self.audio_encoder_type == "wav2vec2":
-            self.audio_encoder = Wav2Vec2Model.from_pretrained(audio_encoder_path)
-            self.audio_dim = self.audio_encoder.config.hidden_size
+            if self.audio_encoder_source == "fairseq":
+                import fairseq
+                models, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([audio_encoder_path])
+                self.audio_encoder = models[0]
+                self.audio_dim = cfg.model.encoder_embed_dim
+            else: # huggingface
+                self.audio_encoder = Wav2Vec2Model.from_pretrained(audio_encoder_path)
+                self.audio_dim = self.audio_encoder.config.hidden_size
             
         elif self.audio_encoder_type == "wavlm":
-            self.audio_encoder = WavLMModel.from_pretrained(audio_encoder_path)
-            self.audio_dim = self.audio_encoder.config.hidden_size
+            if self.audio_encoder_source in ["unil", "microsoft"]:
+                from deepfense.models.modules.wavlm.wavlm import WavLM, WavLMConfig
+                checkpoint = torch.load(audio_encoder_path)
+                cfg = WavLMConfig(checkpoint["cfg"])
+                self.audio_encoder = WavLM(cfg)
+                self.audio_encoder.load_state_dict(checkpoint["model"], strict=False)
+                self.audio_dim = cfg.encoder_embed_dim
+            else: # huggingface
+                self.audio_encoder = WavLMModel.from_pretrained(audio_encoder_path)
+                self.audio_dim = self.audio_encoder.config.hidden_size
             
         else:
             raise ValueError(f"Unknown audio encoder type: {self.audio_encoder_type}")
@@ -198,9 +219,6 @@ class AudioDeepfakeLLM(nn.Module):
         
         if self.audio_encoder_type == "whisper":
             # Whisper expects log-mel spectrograms of specific length
-            # The WhisperModel has learned positional embeddings of fixed size (usually 1500 tokens corresponding to 30s)
-            # We must pad the input to 30s so that conv output matches positional embedding size.
-            
             with torch.no_grad():
                 raw_wav_cpu = raw_wav.cpu().numpy()
                 inputs = self.feature_extractor(
@@ -214,18 +232,51 @@ class AudioDeepfakeLLM(nn.Module):
                 input_features = inputs.input_features.to(device)
                 
             # Forward pass through Whisper Encoder
-            # This returns hidden states of shape [B, 1500, D] (for 30s audio)
             outputs = self.audio_encoder(input_features)
             hidden_states = outputs.last_hidden_state # [B, 1500, D]
             return hidden_states
             
         elif self.audio_encoder_type in ["wav2vec2", "wavlm"]:
             # Wav2Vec2/WavLM expect raw audio
-            outputs = self.audio_encoder(
-                raw_wav, 
-                attention_mask=audio_attention_mask
-            )
-            return outputs.last_hidden_state
+            
+            # Handle different sources
+            if self.audio_encoder_source == "fairseq":
+                # Fairseq Wav2Vec2
+                # Expects input: [B, T]
+                # Returns dict with 'x'
+                
+                # IMPORTANT: Fairseq Wav2Vec2 expects Float tensor, not BFloat16/Half
+                if raw_wav.dtype != torch.float32:
+                    raw_wav_input = raw_wav.to(torch.float32)
+                else:
+                    raw_wav_input = raw_wav
+                    
+                res = self.audio_encoder(raw_wav_input, mask=False, features_only=True)
+                hidden_states = res["x"]
+                print(hidden_states.shape)
+                return hidden_states
+                
+            elif self.audio_encoder_source in ["unil", "microsoft"]:
+                # Microsoft WavLM
+                # Expects input: [B, T]
+                # Returns x (features)
+                
+                if raw_wav.dtype != torch.float32:
+                    raw_wav_input = raw_wav.to(torch.float32)
+                else:
+                    raw_wav_input = raw_wav
+                    
+                hidden_states = self.audio_encoder.extract_features(
+                    raw_wav_input, mask=False, ret_layer_results=True
+                )[0]
+                return hidden_states
+                
+            else: # huggingface
+                outputs = self.audio_encoder(
+                    raw_wav, 
+                    attention_mask=audio_attention_mask
+                )
+                return outputs.last_hidden_state
             
         return None
 
@@ -280,9 +331,9 @@ class AudioDeepfakeLLM(nn.Module):
             embeds_after = self._get_text_embeds(tokens_after.input_ids)
             
             cur_speech_embeds = speech_embeds[i:i+1] # [1, L, H]
-            
+
             combined_embeds = torch.cat([embeds_before, cur_speech_embeds, embeds_after], dim=1)
-            
+
             # Mask
             combined_mask = torch.cat([
                 tokens_before.attention_mask, 

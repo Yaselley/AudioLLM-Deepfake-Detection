@@ -52,9 +52,12 @@ def main(args):
         llm_type=model_cfg.get("llm_type", "qwen2"),
         audio_encoder_path=model_cfg["audio_encoder_path"],
         audio_encoder_type=model_cfg.get("audio_encoder_type", "whisper"),
+        audio_encoder_source=model_cfg.get("audio_encoder_source", "huggingface"),
         freeze_audio_encoder=model_cfg.get("freeze_audio_encoder", True),
         lora=model_cfg.get("lora", True),
-        lora_rank=model_cfg.get("lora_rank", 8),
+        lora_rank=model_cfg.get("lora_rank", 64),
+        lora_alpha=model_cfg.get("lora_alpha", 16),
+        lora_dropout=model_cfg.get("lora_dropout", 0.05),
         special_tokens=model_cfg.get("special_tokens", []),
         device_8bit=0 
     )
@@ -89,20 +92,51 @@ def main(args):
         pin_memory=True
     )
     
-    # Optimizer
-    optimizer = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=float(config["train"]["lr"]),
-        weight_decay=0.05
-    )
+    # Parameter Separation & Counting
+    audio_enc_params = []
+    adapter_params = []
+    llm_params = []
+    
+    audio_enc_param_count = 0
+    adapter_param_count = 0
+    llm_param_count = 0
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+            
+        if "audio_encoder" in name:
+            audio_enc_params.append(param)
+            audio_enc_param_count += param.numel()
+        elif "speech_proj" in name:
+            adapter_params.append(param)
+            adapter_param_count += param.numel()
+        else:
+            llm_params.append(param)
+            llm_param_count += param.numel()
+            
+    logging.info("="*30)
+    logging.info(f"Trainable Parameters Info:")
+    logging.info(f"  Audio Encoder Params:   {audio_enc_param_count:,} (LR: {config['train'].get('lr_audio', config['train'].get('lr', 1e-4))})")
+    logging.info(f"  Audio Adapter Params:   {adapter_param_count:,} (LR: {config['train'].get('lr_adapter', config['train'].get('lr', 1e-4))})")
+    logging.info(f"  LLM/LoRA Params:        {llm_param_count:,} (LR: {config['train'].get('lr_lora', config['train'].get('lr', 1e-4))})")
+    logging.info(f"  Total Trainable Params: {audio_enc_param_count + adapter_param_count + llm_param_count:,}")
+    logging.info("="*30)
+
+    # Optimizer with different groups
+    optimizer = optim.AdamW([
+        {'params': audio_enc_params, 'lr': float(config["train"].get("lr_audio", config["train"].get("lr", 1e-4)))},
+        {'params': adapter_params, 'lr': float(config["train"].get("lr_adapter", config["train"].get("lr", 1e-4)))},
+        {'params': llm_params, 'lr': float(config["train"].get("lr_lora", config["train"].get("lr", 1e-4)))}
+    ], weight_decay=0.05)
     
     num_epochs = config["train"]["epochs"]
-    num_training_steps = num_epochs * len(train_loader)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, 
-        num_warmup_steps=int(0.1 * num_training_steps), 
-        num_training_steps=num_training_steps
-    )
+    # num_training_steps = num_epochs * len(train_loader)
+    # scheduler = get_linear_schedule_with_warmup(
+    #     optimizer, 
+    #     num_warmup_steps=int(0.1 * num_training_steps), 
+    #     num_training_steps=num_training_steps
+    # )
     
     # Training Loop
     logging.info("Starting Training...")
@@ -133,7 +167,7 @@ def main(args):
             
             loss.backward()
             optimizer.step()
-            scheduler.step()
+            # scheduler.step()
             
             total_loss += loss.item()
             global_step += 1
