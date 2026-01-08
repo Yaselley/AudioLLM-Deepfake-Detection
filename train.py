@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 import torch.optim as optim
 import time
+from huggingface_hub import login
 
 from models.audio_llm import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
@@ -24,6 +25,12 @@ def setup_logging(output_dir):
     )
 
 def main(args):
+    # Authenticate with HF
+    if args.hf_token:
+        login(token=args.hf_token)
+    else:
+        login(token="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")
+
     # Load Config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
@@ -48,18 +55,21 @@ def main(args):
         freeze_audio_encoder=model_cfg.get("freeze_audio_encoder", True),
         lora=model_cfg.get("lora", True),
         lora_rank=model_cfg.get("lora_rank", 8),
+        special_tokens=model_cfg.get("special_tokens", []),
         device_8bit=0 
     )
     model.to(device)
     
     # Dataset
     logging.info("Loading Datasets...")
-    # Dataset expects raw audio paths. Feature extraction (spectrogram) happens in Model if needed.
+    
     train_dataset = AudioDeepfakeDataset(
-        config["data"]["train_path"]
+        config["data"]["train_path"],
+        prompt_path=config["data"].get("prompt_path", None)
     )
     val_dataset = AudioDeepfakeDataset(
-        config["data"]["val_path"]
+        config["data"]["val_path"],
+        prompt_path=config["data"].get("prompt_path", None)
     )
     
     train_loader = DataLoader(
@@ -158,18 +168,17 @@ def main(args):
         logging.info(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
         
         # Save Checkpoint
-        ckpt_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt")
-        # Save PEFT model weights or full model
         if config["model"].get("lora", True):
             model.llm_model.save_pretrained(os.path.join(output_dir, f"lora_epoch_{epoch+1}"))
             torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, f"proj_epoch_{epoch+1}.pt"))
         else:
-            torch.save(model.state_dict(), ckpt_path)
+            torch.save(model.state_dict(), os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt"))
             
         logging.info(f"Saved checkpoint to {output_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
+    parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face token")
     args = parser.parse_args()
     main(args)
