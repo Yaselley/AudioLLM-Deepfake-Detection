@@ -211,11 +211,40 @@ class AudioDeepfakeLLM(nn.Module):
                 param.requires_grad = False
             self.speech_proj.eval()
 
+    def _get_feat_extract_output_lengths(self, input_lengths):
+        """
+        Computes the output length of the convolutional layers
+        """
+        if self.audio_encoder_type == "whisper":
+            # For Whisper, we'll map the raw length ratio to 1500 frames
+            # 1500 frames corresponds to 30s (480,000 samples)
+            # 1500 / 480000 = 1/320. So essentially stride is 320.
+            return (input_lengths / 320).ceil().long()
+            
+        elif hasattr(self.audio_encoder, "_get_feat_extract_output_lengths"):
+            return self.audio_encoder._get_feat_extract_output_lengths(input_lengths)
+            
+        else:
+            # Fallback for Fairseq/WavLM custom models
+            # Standard Wav2Vec2/WavLM stride is 320
+            return (input_lengths / 320).ceil().long()
+
     def _process_audio(self, raw_wav, audio_attention_mask=None):
         """
         Extract features from raw audio based on encoder type.
+        Returns:
+            hidden_states: [B, T_feat, D]
+            speech_lens: [B] (Valid lengths of features)
         """
         device = raw_wav.device
+        
+        # Calculate raw lengths
+        if audio_attention_mask is not None:
+            input_lengths = audio_attention_mask.sum(dim=1)
+        else:
+            input_lengths = torch.tensor([raw_wav.shape[1]] * raw_wav.shape[0], device=device)
+            
+        speech_lens = self._get_feat_extract_output_lengths(input_lengths)
         
         if self.audio_encoder_type == "whisper":
             # Whisper expects log-mel spectrograms of specific length
@@ -234,7 +263,11 @@ class AudioDeepfakeLLM(nn.Module):
             # Forward pass through Whisper Encoder
             outputs = self.audio_encoder(input_features)
             hidden_states = outputs.last_hidden_state # [B, 1500, D]
-            return hidden_states
+            
+            # Clamp speech_lens to 1500 just in case
+            speech_lens = torch.clamp(speech_lens, max=1500)
+            
+            return hidden_states, speech_lens
             
         elif self.audio_encoder_type in ["wav2vec2", "wavlm"]:
             # Wav2Vec2/WavLM expect raw audio
@@ -253,8 +286,7 @@ class AudioDeepfakeLLM(nn.Module):
                     
                 res = self.audio_encoder(raw_wav_input, mask=False, features_only=True)
                 hidden_states = res["x"]
-                print(hidden_states.shape)
-                return hidden_states
+                return hidden_states, speech_lens
                 
             elif self.audio_encoder_source in ["unil", "microsoft"]:
                 # Microsoft WavLM
@@ -267,24 +299,24 @@ class AudioDeepfakeLLM(nn.Module):
                     raw_wav_input = raw_wav
                     
                 hidden_states = self.audio_encoder.extract_features(
-                    raw_wav_input, mask=False, ret_layer_results=True
+                    raw_wav_input, mask=False, ret_layer_results=False
                 )[0]
-                return hidden_states
+                return hidden_states, speech_lens
                 
             else: # huggingface
                 outputs = self.audio_encoder(
                     raw_wav, 
                     attention_mask=audio_attention_mask
                 )
-                return outputs.last_hidden_state
+                return outputs.last_hidden_state, speech_lens
             
-        return None
+        return None, None
 
     def encode_speech(self, raw_wav, audio_attention_mask=None):
         with self.maybe_autocast():
-            speech_embeds = self._process_audio(raw_wav, audio_attention_mask)
+            speech_embeds, speech_lens = self._process_audio(raw_wav, audio_attention_mask)
             speech_embeds = self.speech_proj(speech_embeds)
-            return speech_embeds
+            return speech_embeds, speech_lens
 
     def _get_text_embeds(self, token_ids):
         """
@@ -474,16 +506,16 @@ class AudioDeepfakeLLM(nn.Module):
         audio_attention_mask = samples.get("audio_attention_mask", None)
         
         # Encode
-        speech_embeds = self.encode_speech(raw_wav, audio_attention_mask)
+        speech_embeds, speech_lens = self.encode_speech(raw_wav, audio_attention_mask)
         
         # Wrap
         if prompts is not None:
             multi_prompt = isinstance(prompts, list)
-            inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, prompts, multi_prompt=multi_prompt)
+            inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, speech_lens, prompts, multi_prompt=multi_prompt)
         elif "prompt" in samples:
             prompts = samples["prompt"]
             multi_prompt = isinstance(prompts, list)
-            inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, prompts, multi_prompt=multi_prompt)
+            inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, speech_lens, prompts, multi_prompt=multi_prompt)
         else:
              raise ValueError("Prompts must be provided")
         

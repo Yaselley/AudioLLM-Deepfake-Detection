@@ -205,6 +205,10 @@ def main(args):
         if config["model"].get("lora", True):
             model.llm_model.save_pretrained(os.path.join(output_dir, f"lora_epoch_{epoch+1}"))
             torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, f"proj_epoch_{epoch+1}.pt"))
+
+            # Save Audio Encoder if not frozen
+            if not config["model"].get("freeze_audio_encoder", True):
+                 torch.save(model.audio_encoder.state_dict(), os.path.join(output_dir, f"audio_encoder_epoch_{epoch+1}.pt"))
         else:
             torch.save(model.state_dict(), os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt"))
             

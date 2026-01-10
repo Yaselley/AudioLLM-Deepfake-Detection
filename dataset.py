@@ -46,7 +46,6 @@ class AudioDeepfakeDataset(Dataset):
         item = self.data[index]
         audio_path = item["path"]
         label_str = item.get("label", "real") # "real" or "fake"
-        
         # Load Audio
         try:
             audio, _ = librosa.load(audio_path, sr=self.sample_rate)
@@ -56,10 +55,10 @@ class AudioDeepfakeDataset(Dataset):
             
         # Convert to Tensor
         raw_wav = torch.from_numpy(audio).float()
-        
+
         # Text Label
         text_target = "Real" if label_str.lower() == "real" else "Fake"
-        
+
         # Select Random Prompt
         prompt = random.choice(self.prompts)
         
@@ -79,12 +78,17 @@ class AudioDeepfakeDataset(Dataset):
         texts = [b["text"] for b in batch]
         prompts = [b["prompt"] for b in batch]
         paths = [b["path"] for b in batch]
+
+        # 1 for valid, 0 for padding (Standard Transformers)
+        attention_mask = torch.arange(padded_wavs.size(1)).unsqueeze(0) < raw_wav_lens.unsqueeze(1)
         
-        audio_attention_mask = torch.arange(padded_wavs.size(1)).unsqueeze(0) < raw_wav_lens.unsqueeze(1)
+        # True for padding, False for valid (Common for Fairseq/WavLM)
+        padding_mask = ~attention_mask
         
         return {
             "raw_wav": padded_wavs,
-            "audio_attention_mask": audio_attention_mask,
+            "padding_mask": padding_mask,
+            "audio_attention_mask": attention_mask, # 1=valid, 0=padding
             "text": texts,
             "prompt": prompts,
             "path": paths
