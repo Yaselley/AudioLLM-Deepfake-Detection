@@ -3,14 +3,30 @@ import argparse
 import yaml
 import logging
 import torch
+import json
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 import torch.optim as optim
 import time
 from huggingface_hub import login
+import numpy as np
+import random
+from sklearn.metrics import accuracy_score
 
 from models.audio_llm import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
+
+def set_seed(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def setup_logging(output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -38,6 +54,15 @@ def main(args):
     output_dir = config.get("output_dir", "./output")
     setup_logging(output_dir)
     logging.info(f"Config: {config}")
+
+    # Save Config
+    with open(os.path.join(output_dir, "config.json"), 'w') as f:
+        json.dump(config, f, indent=4)
+    
+    # Set Seed
+    seed = config["train"].get("seed", 42)
+    set_seed(seed)
+    logging.info(f"Set seed to {seed}")
     
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -131,16 +156,16 @@ def main(args):
     ], weight_decay=0.05)
     
     num_epochs = config["train"]["epochs"]
-    # num_training_steps = num_epochs * len(train_loader)
-    # scheduler = get_linear_schedule_with_warmup(
-    #     optimizer, 
-    #     num_warmup_steps=int(0.1 * num_training_steps), 
-    #     num_training_steps=num_training_steps
-    # )
     
     # Training Loop
     logging.info("Starting Training...")
     global_step = 0
+    
+    grad_accum_steps = config["train"].get("grad_accum_steps", 1)
+    
+    # Track best validation loss
+    best_val_loss = float('inf')
+    best_epoch = 0
     
     for epoch in range(num_epochs):
         model.train()
@@ -160,20 +185,23 @@ def main(args):
                 "prompt": batch["prompt"]
             }
             
-            optimizer.zero_grad()
+            # optimizer.zero_grad() # Moved to accumulation logic
             
             outputs = model(samples)
-            loss = outputs["loss"]
+            loss = outputs["loss"] / grad_accum_steps
             
             loss.backward()
-            optimizer.step()
-            # scheduler.step()
             
-            total_loss += loss.item()
-            global_step += 1
+            if (step + 1) % grad_accum_steps == 0:
+                optimizer.step()
+                # scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+            
+            total_loss += loss.item() * grad_accum_steps
             
             if step % 10 == 0:
-                logging.info(f"Epoch {epoch+1}/{num_epochs} | Step {step}/{len(train_loader)} | Loss: {loss.item():.4f}")
+                logging.info(f"Epoch {epoch+1}/{num_epochs} | Step {step}/{len(train_loader)} | Loss: {loss.item() * grad_accum_steps:.4f}")
         
         avg_train_loss = total_loss / len(train_loader)
         epoch_time = time.time() - start_time
@@ -181,7 +209,7 @@ def main(args):
         
         # Validation
         model.eval()
-        val_loss = 0
+        val_loss = 0  # Start at 0 to accumulate losses from all batches
         with torch.no_grad():
             for batch in val_loader:
                 raw_wav = batch["raw_wav"].to(device)
@@ -201,18 +229,47 @@ def main(args):
         avg_val_loss = val_loss / len(val_loader)
         logging.info(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
         
-        # Save Checkpoint
+        # Check if this is the best validation loss
+        is_best = avg_val_loss < best_val_loss
+        if is_best:
+            best_val_loss = avg_val_loss
+            best_epoch = epoch + 1
+            logging.info(f"New best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+        
+        # Save Checkpoint (always save, but mark best)
         if config["model"].get("lora", True):
+            # Save regular checkpoint
             model.llm_model.save_pretrained(os.path.join(output_dir, f"lora_epoch_{epoch+1}"))
             torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, f"proj_epoch_{epoch+1}.pt"))
 
             # Save Audio Encoder if not frozen
             if not config["model"].get("freeze_audio_encoder", True):
                  torch.save(model.audio_encoder.state_dict(), os.path.join(output_dir, f"audio_encoder_epoch_{epoch+1}.pt"))
+            
+            # Save best checkpoint (overwrite previous best)
+            if is_best:
+                model.llm_model.save_pretrained(os.path.join(output_dir, "lora_best"))
+                torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, "proj_best.pt"))
+                if not config["model"].get("freeze_audio_encoder", True):
+                    torch.save(model.audio_encoder.state_dict(), os.path.join(output_dir, "audio_encoder_best.pt"))
+                logging.info(f"Saved best checkpoint (epoch {best_epoch}) with val_loss: {best_val_loss:.4f}")
         else:
+            # Save regular checkpoint
             torch.save(model.state_dict(), os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt"))
             
+            # Save best checkpoint
+            if is_best:
+                torch.save(model.state_dict(), os.path.join(output_dir, "checkpoint_best.pt"))
+                logging.info(f"Saved best checkpoint (epoch {best_epoch}) with val_loss: {best_val_loss:.4f}")
+            
         logging.info(f"Saved checkpoint to {output_dir}")
+    
+    # Final summary
+    logging.info("="*50)
+    logging.info(f"Training Complete!")
+    logging.info(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+    logging.info(f"Best checkpoint saved as: lora_best / proj_best.pt")
+    logging.info("="*50)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

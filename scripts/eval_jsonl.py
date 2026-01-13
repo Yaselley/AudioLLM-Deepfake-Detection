@@ -7,6 +7,7 @@ import pandas as pd
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from peft import PeftModel
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 # Add project root to path
 import sys
@@ -18,10 +19,14 @@ from dataset import AudioDeepfakeDataset
 from huggingface_hub import login
 login(token="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")
 
-def load_model(config_path, checkpoint_dir, epoch, device):
+def load_model(checkpoint_dir, epoch, device):
     # Load Config
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config_path = os.path.join(checkpoint_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        raise FileNotFoundError(f"Config file not found in {checkpoint_dir}. Expected config.json")
     
     # Initialize Model
     model_cfg = config["model"]
@@ -70,7 +75,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load Model
-    model = load_model(args.config, args.checkpoint_dir, args.epoch, device)
+    model = load_model(args.checkpoint_dir, args.epoch, device)
     
     # Load Dataset
     # We use AudioDeepfakeDataset but we might want to override prompts to be fixed for evaluation
@@ -102,8 +107,9 @@ def main(args):
     with torch.no_grad():
         for batch in tqdm(dataloader):
             raw_wav = batch["raw_wav"].to(device)
-            audio_attention_mask = batch["audio_attention_mask"].to(device)
-            padding_mask = batch["padding_mask"].to(device)
+            audio_attention_mask = batch.get("audio_attention_mask", None)
+            if audio_attention_mask is not None:
+                audio_attention_mask = audio_attention_mask.to(device)
             
             # Use the prompts from the batch (which are strings)
             prompts = batch["prompt"]
@@ -111,7 +117,6 @@ def main(args):
             samples = {
                 "raw_wav": raw_wav,
                 "audio_attention_mask": audio_attention_mask,
-                "padding_mask": padding_mask,
                 "prompt": prompts
             }
             
@@ -203,27 +208,37 @@ def main(args):
     print(f"F1 Score (Fake): {f1:.4f}")
     print("="*30)
 
+    # Determine output CSV path based on input JSONL name
+    if args.output_csv:
+        output_csv_path = args.output_csv
+    else:
+        # Extract base name from input JSONL (e.g., "itw.jsonl" -> "itw")
+        input_basename = os.path.basename(args.input_jsonl)
+        input_name = os.path.splitext(input_basename)[0]
+        # Save in checkpoint directory
+        output_csv_path = os.path.join(args.checkpoint_dir, f"{input_name}_{args.epoch}.csv")
+    
     # Save to CSV
     df = pd.DataFrame(results)
-    df.to_csv(args.output_csv, index=False)
-    print(f"Results saved to {args.output_csv}")
+    df.to_csv(output_csv_path, index=False)
+    print(f"Results saved to {output_csv_path}")
     
-    # Save Metrics JSON
-    base_name = os.path.splitext(args.output_csv)[0]
-    metrics_path = base_name + "_metrics.json"
+    # Save Metrics JSON (in same directory as CSV)
+    base_name = os.path.splitext(output_csv_path)[0]
+    metrics_path = base_name + f"_metrics_{args.epoch}.json"
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=4)
     print(f"Metrics saved to {metrics_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
+    # parser.add_argument("--config", type=str, required=True, help="Path to config yaml") # Removed
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Directory containing checkpoints (output_dir)")
     parser.add_argument("--epoch", type=int, required=True, help="Epoch number to load")
     parser.add_argument("--input_jsonl", type=str, required=True, help="Path to input JSONL file")
-    parser.add_argument("--output_csv", type=str, required=True, help="Path to output CSV file")
+    parser.add_argument("--output_csv", type=str, default=None, help="Path to output CSV file (optional, defaults to <input_name>.csv in checkpoint_dir)")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--prompt", type=str, default="<Speech><SpeechHere></Speech> Is this audio real or fake?", help="Prompt to use for evaluation")
+    parser.add_argument("--prompt", type=str, default="Listen to this audio clip: <Speech><SpeechHere></Speech>. Is this audio real or fake?", help="Prompt to use for evaluation")
     
     args = parser.parse_args()
     main(args)

@@ -1,5 +1,13 @@
 {
     "deepfake_detection": [
-        "<Speech><SpeechHere></Speech> Is this audio real or fake?"
+        "<Speech><SpeechHere></Speech> Is this audio real or fake?",
+        "<Speech><SpeechHere></Speech> Analyze the authenticity of this audio clip.",
+        "<Speech><SpeechHere></Speech> Determine if this speech is genuine or deepfake.",
+        "<Speech><SpeechHere></Speech> Is the speaker in this audio a real human or an AI?",
+        "<Speech><SpeechHere></Speech> Classify this audio as either 'Real' or 'Fake'.",
+        "<Speech><SpeechHere></Speech> Listen to this clip. Is it AI-generated?",
+        "<Speech><SpeechHere></Speech> Verify the authenticity of this voice recording.",
+        "<Speech><SpeechHere></Speech> Tell me if this audio is synthetic or natural.",
+        "User: <Speech><SpeechHere></Speech> Is this audio real or fake? Answer: "
     ]
 }

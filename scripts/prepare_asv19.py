@@ -62,5 +62,9 @@ def main():
     val_output = os.path.join(output_dir, "asv19_val.jsonl")
     convert_parquet_to_jsonl(val_input, val_output)
 
+    val_input = os.path.join(base_parquet_dir, "asvspoof19_test.parquet")
+    val_output = os.path.join(output_dir, "asv19_test.jsonl")
+    convert_parquet_to_jsonl(val_input, val_output)
+
 if __name__ == "__main__":
     main()

@@ -9,9 +9,12 @@ from transformers import (
     AutoTokenizer, 
     LlamaTokenizer, 
     Wav2Vec2Model, 
-    WavLMModel, 
+    WavLMModel,
+    Wav2Vec2BertModel,
     WhisperFeatureExtractor,
-    AutoModelForCausalLM
+    AutoModelForCausalLM,
+    AutoProcessor,
+    AutoFeatureExtractor
 )
 
 from transformers import Qwen2Tokenizer
@@ -194,6 +197,11 @@ class AudioDeepfakeLLM(nn.Module):
             else: # huggingface
                 self.audio_encoder = WavLMModel.from_pretrained(audio_encoder_path)
                 self.audio_dim = self.audio_encoder.config.hidden_size
+        
+        elif self.audio_encoder_type == "wav2vec2-bert":
+            self.audio_encoder = Wav2Vec2BertModel.from_pretrained(audio_encoder_path)
+            self.audio_dim = self.audio_encoder.config.hidden_size
+            self.processor = AutoFeatureExtractor.from_pretrained(audio_encoder_path)
             
         else:
             raise ValueError(f"Unknown audio encoder type: {self.audio_encoder_type}")
@@ -216,10 +224,17 @@ class AudioDeepfakeLLM(nn.Module):
         Computes the output length of the convolutional layers
         """
         if self.audio_encoder_type == "whisper":
-            # For Whisper, we'll map the raw length ratio to 1500 frames
-            # 1500 frames corresponds to 30s (480,000 samples)
-            # 1500 / 480000 = 1/320. So essentially stride is 320.
-            return (input_lengths / 320).ceil().long()
+            # Whisper: 16kHz -> 10ms stride (160 samples) -> Encoder
+            feat_lens = (input_lengths / 160).ceil().long()
+            return self.audio_encoder._get_feat_extract_output_lengths(feat_lens)
+            
+        elif self.audio_encoder_type == "wav2vec2-bert":
+            # W2V-BERT 2.0 uses 160-dim fbank features extracted every 10ms (160 samples)
+            # 1. Map samples to frames (stride 160)
+            feat_lens = (input_lengths / 160).ceil().long()
+            
+            # 2. Map frames to encoder output (usually 4x subsampling)
+            return self.audio_encoder._get_feat_extract_output_lengths(feat_lens)
             
         elif hasattr(self.audio_encoder, "_get_feat_extract_output_lengths"):
             return self.audio_encoder._get_feat_extract_output_lengths(input_lengths)
@@ -309,6 +324,26 @@ class AudioDeepfakeLLM(nn.Module):
                     attention_mask=audio_attention_mask
                 )
                 return outputs.last_hidden_state, speech_lens
+                
+        elif self.audio_encoder_type == "wav2vec2-bert":
+            # W2V-BERT requires feature extraction (fbank) via processor
+            with torch.no_grad():
+                raw_wav_cpu = raw_wav.cpu().numpy()
+                # Processor expects list of arrays
+                inputs = self.processor(
+                    [w for w in raw_wav_cpu], 
+                    sampling_rate=16000, 
+                    return_tensors="pt",
+                    padding="longest"
+                )
+                input_features = inputs.input_features.to(device)
+                attention_mask = inputs.attention_mask.to(device)
+            
+            outputs = self.audio_encoder(
+                input_features=input_features, 
+                attention_mask=attention_mask
+            )
+            return outputs.last_hidden_state, speech_lens
             
         return None, None
 
@@ -337,9 +372,10 @@ class AudioDeepfakeLLM(nn.Module):
             except:
                 return self.llm_model.embed_tokens(token_ids)
 
-    def prompt_wrap(self, speech_embeds, prompt, multi_prompt=False):
+    def prompt_wrap(self, speech_embeds, speech_lens, prompt, multi_prompt=False, padding_side="right", prefix_embeds=None):
         """
         Wraps speech embeddings with text prompts.
+        Uses apply_chat_template if available for correct chat formatting.
         """
         batch_size = speech_embeds.shape[0]
         device = speech_embeds.device
@@ -351,10 +387,52 @@ class AudioDeepfakeLLM(nn.Module):
             prompts = [prompts] * batch_size
 
         for i, prompt in enumerate(prompts):
-            if "<SpeechHere>" not in prompt:
-                p_before, p_after = prompt, ""
+            p_before = ""
+            p_after = ""
+            
+            # Try to apply chat template if available
+            if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template is not None:
+                try:
+                    # Use a unique placeholder to avoid tokenization issues
+                    placeholder = "___SPEECH_PLACEHOLDER___"
+                    
+                    # Clean up legacy "User: ... Answer:" if present to avoid double prompting
+                    clean_prompt = prompt.replace("User:", "").replace("Answer:", "").strip()
+                    clean_prompt = clean_prompt.replace("<SpeechHere>", placeholder)
+                    
+                    # Prepare messages
+                    messages = [
+                        {"role": "system", "content": "You are a helpful assistant."}, 
+                        {"role": "user", "content": clean_prompt}
+                    ]
+                    
+                    # apply_chat_template returns a string
+                    full_formatted_prompt = self.tokenizer.apply_chat_template(
+                        messages, 
+                        tokenize=False, 
+                        add_generation_prompt=True
+                    )
+                    
+                    if placeholder in full_formatted_prompt:
+                        p_before, p_after = full_formatted_prompt.split(placeholder)
+                    else:
+                        # Fallback if placeholder was mangled
+                        if "<SpeechHere>" not in prompt:
+                            p_before, p_after = prompt, ""
+                        else:
+                            p_before, p_after = prompt.split("<SpeechHere>")
+                except Exception as e:
+                    # Fallback to raw string splitting if chat template fails
+                    if "<SpeechHere>" not in prompt:
+                        p_before, p_after = prompt, ""
+                    else:
+                        p_before, p_after = prompt.split("<SpeechHere>")
             else:
-                p_before, p_after = prompt.split("<SpeechHere>")
+                # No chat template available, use simple splitting
+                if "<SpeechHere>" not in prompt:
+                    p_before, p_after = prompt, ""
+                else:
+                    p_before, p_after = prompt.split("<SpeechHere>")
             
             tokens_before = self.tokenizer(p_before, return_tensors="pt", add_special_tokens=False).to(device)
             tokens_after = self.tokenizer(p_after, return_tensors="pt", add_special_tokens=False).to(device)
@@ -362,7 +440,10 @@ class AudioDeepfakeLLM(nn.Module):
             embeds_before = self._get_text_embeds(tokens_before.input_ids)
             embeds_after = self._get_text_embeds(tokens_after.input_ids)
             
-            cur_speech_embeds = speech_embeds[i:i+1] # [1, L, H]
+            # Slice speech embeds to valid length using speech_lens
+            valid_len = speech_lens[i]
+            
+            cur_speech_embeds = speech_embeds[i:i+1, :valid_len, :] # [1, valid_len, H]
 
             combined_embeds = torch.cat([embeds_before, cur_speech_embeds, embeds_after], dim=1)
 
@@ -372,6 +453,13 @@ class AudioDeepfakeLLM(nn.Module):
                 torch.ones(cur_speech_embeds.shape[:2], device=device), 
                 tokens_after.attention_mask
             ], dim=1)
+            
+            # Add Prefix (e.g., BOS) if provided
+            if prefix_embeds is not None:
+                # prefix_embeds is [B, L_prefix, H]
+                curr_prefix = prefix_embeds[i:i+1]
+                combined_embeds = torch.cat([curr_prefix, combined_embeds], dim=1)
+                combined_mask = torch.cat([torch.ones(curr_prefix.shape[:2], device=device), combined_mask], dim=1)
             
             input_embeds_list.append(combined_embeds)
             attn_mask_list.append(combined_mask)
@@ -387,9 +475,15 @@ class AudioDeepfakeLLM(nn.Module):
             pad_len = max_len - curr_len
             
             if pad_len > 0:
-                # Use same dtype as embeddings
-                p_emb = torch.cat([input_embeds_list[i], torch.zeros(1, pad_len, input_embeds_list[i].shape[2], dtype=input_embeds_list[i].dtype, device=device)], dim=1)
-                p_mask = torch.cat([attn_mask_list[i], torch.zeros(1, pad_len, device=device)], dim=1)
+                pad_emb = torch.zeros(1, pad_len, input_embeds_list[i].shape[2], dtype=input_embeds_list[i].dtype, device=device)
+                pad_msk = torch.zeros(1, pad_len, device=device)
+                
+                if padding_side == "right":
+                    p_emb = torch.cat([input_embeds_list[i], pad_emb], dim=1)
+                    p_mask = torch.cat([attn_mask_list[i], pad_msk], dim=1)
+                else: # left
+                    p_emb = torch.cat([pad_emb, input_embeds_list[i]], dim=1)
+                    p_mask = torch.cat([pad_msk, attn_mask_list[i]], dim=1)
             else:
                 p_emb = input_embeds_list[i]
                 p_mask = attn_mask_list[i]
@@ -399,7 +493,7 @@ class AudioDeepfakeLLM(nn.Module):
             
         final_embeds = torch.cat(padded_embeds, dim=0)
         final_masks = torch.cat(padded_masks, dim=0)
-        
+                
         return final_embeds, final_masks
 
     def forward(self, samples, verbose=False):
@@ -407,7 +501,7 @@ class AudioDeepfakeLLM(nn.Module):
         audio_attention_mask = samples.get("audio_attention_mask", None)
         
         # 1. Encode Audio
-        speech_embeds = self.encode_speech(raw_wav, audio_attention_mask)
+        speech_embeds, speech_lens = self.encode_speech(raw_wav, audio_attention_mask)
         
         # 2. Get Prompts
         prompts = samples.get("prompt", None)
@@ -416,7 +510,7 @@ class AudioDeepfakeLLM(nn.Module):
 
         # 3. Wrap Inputs
         multi_prompt = isinstance(prompts, list)
-        inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, prompts, multi_prompt=multi_prompt)
+        inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, speech_lens, prompts, multi_prompt=multi_prompt, padding_side="right")
         
         # 4. Prepare Targets (Labels)
         text_targets = [t + self.end_sym for t in samples["text"]]
@@ -436,15 +530,21 @@ class AudioDeepfakeLLM(nn.Module):
             tgt_tokens = self.tokenizer(tgt_text, return_tensors="pt", add_special_tokens=False).to(device)
             tgt_embeds = self._get_text_embeds(tgt_tokens.input_ids)
             
-            curr_input_embeds = inputs_embeds[i] # [Max_Len, H]
-            curr_mask = attention_mask[i] # [Max_Len]
+            curr_input_embeds = inputs_embeds[i:i+1] # [1, Max_Len, H] - keep batch dimension
+            curr_mask = attention_mask[i:i+1] # [1, Max_Len] - keep batch dimension
             
-            # Remove padding from input preparation (slice to valid length)
-            valid_len = curr_mask.sum().int().item()
-            real_input_embeds = curr_input_embeds[:valid_len].unsqueeze(0)
-            real_mask = curr_mask[:valid_len].unsqueeze(0)
+            # Get valid length (number of non-padding tokens)
+            valid_len = curr_mask.sum(dim=1).int().item()  # Sum over sequence dimension
+            
+            # Slice to valid length (remove right padding)
+            real_input_embeds = curr_input_embeds[:, :valid_len]  # [1, valid_len, H]
+            real_mask = curr_mask[:, :valid_len]  # [1, valid_len] - should be all 1s
             
             # Concat: [BOS, Prompt+Speech, Target]
+            # Since Prompt+Speech already includes the start of the assistant turn (via Chat Template),
+            # we just append the Target which is the assistant's answer content.
+            # And usually the chat template ends with <|im_start|>assistant\n
+            
             full_emb = torch.cat([bos_embeds, real_input_embeds, tgt_embeds], dim=1)
             full_msk = torch.cat([torch.ones(1, 1, device=device), real_mask, tgt_tokens.attention_mask], dim=1)
             
@@ -471,6 +571,7 @@ class AudioDeepfakeLLM(nn.Module):
             pad_len = max_len - full_embeds_list[i].shape[1]
             
             if pad_len > 0:
+                # Right Padding for Training (Forward)
                 p_emb = torch.cat([full_embeds_list[i], torch.zeros(1, pad_len, full_embeds_list[i].shape[2], dtype=full_embeds_list[i].dtype, device=device)], dim=1)
                 p_mask = torch.cat([full_mask_list[i], torch.zeros(1, pad_len, device=device)], dim=1)
                 p_lbl = torch.cat([labels_list[i], torch.full((1, pad_len), -100, dtype=torch.long, device=device)], dim=1)
@@ -508,33 +609,36 @@ class AudioDeepfakeLLM(nn.Module):
         # Encode
         speech_embeds, speech_lens = self.encode_speech(raw_wav, audio_attention_mask)
         
-        # Wrap
-        if prompts is not None:
-            multi_prompt = isinstance(prompts, list)
-            inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, speech_lens, prompts, multi_prompt=multi_prompt)
-        elif "prompt" in samples:
-            prompts = samples["prompt"]
-            multi_prompt = isinstance(prompts, list)
-            inputs_embeds, attention_mask = self.prompt_wrap(speech_embeds, speech_lens, prompts, multi_prompt=multi_prompt)
-        else:
-             raise ValueError("Prompts must be provided")
-        
-        # Add BOS
-        batch_size = inputs_embeds.shape[0]
+        # Prepare Prompts
+        if prompts is None:
+            if "prompt" in samples:
+                prompts = samples["prompt"]
+            else:
+                 raise ValueError("Prompts must be provided")
+
+        multi_prompt = isinstance(prompts, list)
+
+        # Prepare BOS
+        batch_size = speech_embeds.shape[0]
         bos_token_id = self.tokenizer.bos_token_id if self.tokenizer.bos_token_id else self.tokenizer.eos_token_id
         
         bos = torch.ones(
             [batch_size, 1],
             dtype=torch.long,
-            device=inputs_embeds.device,
+            device=speech_embeds.device,
         ) * bos_token_id
-        
         bos_embeds = self._get_text_embeds(bos)
-        atts_bos = torch.ones([batch_size, 1], dtype=torch.long).to(inputs_embeds.device)
-        
-        inputs_embeds = torch.cat([bos_embeds, inputs_embeds], dim=1)
-        attention_mask = torch.cat([atts_bos, attention_mask], dim=1)
 
+        # Wrap with Left Padding and Prefix (BOS)
+        inputs_embeds, attention_mask = self.prompt_wrap(
+            speech_embeds, 
+            speech_lens, 
+            prompts, 
+            multi_prompt=multi_prompt, 
+            padding_side="left",
+            prefix_embeds=bos_embeds
+        )
+        
         # Generate
         outputs = self.llm_model.generate(
             inputs_embeds=inputs_embeds,

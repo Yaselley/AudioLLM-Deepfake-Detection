@@ -2,6 +2,7 @@ import os
 import argparse
 import yaml
 import torch
+import json
 import librosa
 import numpy as np
 from peft import PeftModel
@@ -14,10 +15,16 @@ from models.audio_llm import AudioDeepfakeLLM
 from huggingface_hub import login
 login(token="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")
 
-def load_model(config_path, checkpoint_dir, epoch, device):
+def load_model(checkpoint_dir, epoch, device):
     # Load Config
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    config_path = os.path.join(checkpoint_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        # Fallback to yaml if json not found, assuming it might be there or error
+        # Try to find a yaml file in the directory or just fail if strict
+        raise FileNotFoundError(f"Config file not found in {checkpoint_dir}. Expected config.json")
     
     # Initialize Model
     model_cfg = config["model"]
@@ -100,13 +107,15 @@ def main(args):
         return
 
     raw_wav = raw_wav.to(device)
-    att_mask = att_mask.to(device)
-    pad_mask = pad_mask.to(device)
+    # att_mask and pad_mask might be needed depending on your model changes, 
+    # but encode_speech usually just needs raw_wav + audio_attention_mask.
+    # If audio_attention_mask was not correctly set in process_audio for non-batch, it's just ones.
+    if att_mask is not None:
+         att_mask = att_mask.to(device)
     
     samples = {
         "raw_wav": raw_wav,
         "audio_attention_mask": att_mask,
-        "padding_mask": pad_mask,
         "prompt": [args.prompt]
     }
     
@@ -131,7 +140,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
+    # parser.add_argument("--config", type=str, required=True, help="Path to config yaml") # Removed
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Directory containing checkpoints (output_dir)")
     parser.add_argument("--epoch", type=int, required=True, help="Epoch number to load")
     parser.add_argument("--audio_path", type=str, required=True, help="Path to audio file")
