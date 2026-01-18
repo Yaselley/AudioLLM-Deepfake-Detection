@@ -131,6 +131,61 @@ def get_best_epoch_per_config(df):
     
     return pd.DataFrame(best_rows)
 
+def analyze_epoch_variation(df):
+    """Analyze variation in metrics across epochs for each configuration"""
+    variation_data = []
+    
+    for (size, encoder, freeze, dataset), group in df.groupby(['model_size', 'encoder', 'freeze_status', 'dataset']):
+        if len(group) < 2:  # Need at least 2 epochs to calculate variation
+            continue
+        
+        # Calculate statistics
+        f1_scores = group['f1_fake'].dropna()
+        acc_scores = group['accuracy'].dropna()
+        
+        if len(f1_scores) < 2:
+            continue
+        
+        f1_mean = f1_scores.mean()
+        f1_std = f1_scores.std()
+        f1_min = f1_scores.min()
+        f1_max = f1_scores.max()
+        f1_range = f1_max - f1_min
+        f1_cv = (f1_std / f1_mean) * 100 if f1_mean > 0 else 0  # Coefficient of variation
+        
+        acc_mean = acc_scores.mean()
+        acc_std = acc_scores.std()
+        acc_min = acc_scores.min()
+        acc_max = acc_scores.max()
+        acc_range = acc_max - acc_min
+        
+        # Get epochs
+        epochs = sorted(group['epoch'].tolist())
+        
+        variation_data.append({
+            'model_size': size,
+            'encoder': encoder,
+            'freeze_status': freeze,
+            'dataset': dataset,
+            'num_epochs': len(group),
+            'epochs': ','.join(map(str, epochs)),
+            'f1_mean': f1_mean,
+            'f1_std': f1_std,
+            'f1_min': f1_min,
+            'f1_max': f1_max,
+            'f1_range': f1_range,
+            'f1_cv': f1_cv,  # Coefficient of variation (%)
+            'acc_mean': acc_mean,
+            'acc_std': acc_std,
+            'acc_min': acc_min,
+            'acc_max': acc_max,
+            'acc_range': acc_range,
+            'best_epoch': group.loc[group['f1_fake'].idxmax(), 'epoch'],
+            'worst_epoch': group.loc[group['f1_fake'].idxmin(), 'epoch'],
+        })
+    
+    return pd.DataFrame(variation_data)
+
 def create_summary_tables(df_best):
     """Create summary comparison tables"""
     
@@ -214,7 +269,7 @@ def create_summary_tables(df_best):
     
     return pd.DataFrame(encoder_comparison), pd.DataFrame(freeze_comparison), pd.DataFrame(size_comparison)
 
-def generate_insights(df_best, encoder_df, freeze_df, size_df):
+def generate_insights(df_best, encoder_df, freeze_df, size_df, df_variation):
     """Generate key insights"""
     insights = []
     
@@ -225,6 +280,36 @@ def generate_insights(df_best, encoder_df, freeze_df, size_df):
                    f"Freeze: {best_overall['freeze_status']}, Dataset: {best_overall['dataset']}")
     insights.append(f"   F1 Score: {best_overall['f1_fake']:.4f}, Accuracy: {best_overall['accuracy']:.4f}")
     insights.append("")
+    
+    # Insight: Epoch Variation
+    if not df_variation.empty:
+        insights.append(f"📊 Epoch-to-Epoch Variation Analysis:")
+        avg_f1_range = df_variation['f1_range'].mean()
+        max_f1_range = df_variation['f1_range'].max()
+        avg_f1_cv = df_variation['f1_cv'].mean()
+        max_f1_cv = df_variation['f1_cv'].max()
+        
+        insights.append(f"   Average F1 Range (max-min): {avg_f1_range:.4f}")
+        insights.append(f"   Maximum F1 Range: {max_f1_range:.4f}")
+        insights.append(f"   Average Coefficient of Variation: {avg_f1_cv:.2f}%")
+        insights.append(f"   Maximum Coefficient of Variation: {max_f1_cv:.2f}%")
+        insights.append("")
+        
+        # Find most unstable configurations
+        most_unstable = df_variation.nlargest(5, 'f1_range')[['model_size', 'encoder', 'freeze_status', 'dataset', 'f1_range', 'f1_cv']]
+        insights.append(f"   ⚠️  Most Unstable Configurations (Top 5 by F1 Range):")
+        for idx, row in most_unstable.iterrows():
+            insights.append(f"      {row['model_size']} {row['encoder']} {row['freeze_status']} on {row['dataset']}: "
+                          f"Range={row['f1_range']:.4f}, CV={row['f1_cv']:.2f}%")
+        insights.append("")
+        
+        # Find most stable configurations
+        most_stable = df_variation.nsmallest(5, 'f1_range')[['model_size', 'encoder', 'freeze_status', 'dataset', 'f1_range', 'f1_cv']]
+        insights.append(f"   ✅ Most Stable Configurations (Top 5 by F1 Range):")
+        for idx, row in most_stable.iterrows():
+            insights.append(f"      {row['model_size']} {row['encoder']} {row['freeze_status']} on {row['dataset']}: "
+                          f"Range={row['f1_range']:.4f}, CV={row['f1_cv']:.2f}%")
+        insights.append("")
     
     # Insight 2: Encoder comparison
     if not encoder_df.empty:
@@ -273,22 +358,31 @@ def main():
     print("Finding best epochs per configuration...")
     df_best = get_best_epoch_per_config(df)
     
+    print("Analyzing epoch-to-epoch variation...")
+    df_variation = analyze_epoch_variation(df)
+    
     print("Creating summary tables...")
     encoder_df, freeze_df, size_df = create_summary_tables(df_best)
     
-    # Save all tables
-    output_file = os.path.join(output_dir, "metrics_analysis.xlsx")
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        df_best.to_excel(writer, sheet_name='Best_Epochs', index=False)
-        encoder_df.to_excel(writer, sheet_name='Encoder_Comparison', index=False)
-        freeze_df.to_excel(writer, sheet_name='Freeze_Comparison', index=False)
-        size_df.to_excel(writer, sheet_name='Size_Comparison', index=False)
-        df.to_excel(writer, sheet_name='All_Data', index=False)
+    # Save all tables as CSV files
+    output_dir_path = Path(output_dir)
+    df_best.to_csv(output_dir_path / "metrics_best_epochs.csv", index=False)
+    encoder_df.to_csv(output_dir_path / "metrics_encoder_comparison.csv", index=False)
+    freeze_df.to_csv(output_dir_path / "metrics_freeze_comparison.csv", index=False)
+    size_df.to_csv(output_dir_path / "metrics_size_comparison.csv", index=False)
+    df_variation.to_csv(output_dir_path / "metrics_epoch_variation.csv", index=False)
+    df.to_csv(output_dir_path / "metrics_all_data.csv", index=False)
     
-    print(f"Saved analysis to {output_file}")
+    print(f"Saved analysis tables to {output_dir_path}/")
+    print("  - metrics_best_epochs.csv")
+    print("  - metrics_encoder_comparison.csv")
+    print("  - metrics_freeze_comparison.csv")
+    print("  - metrics_size_comparison.csv")
+    print("  - metrics_epoch_variation.csv")
+    print("  - metrics_all_data.csv")
     
     # Generate and print insights
-    insights = generate_insights(df_best, encoder_df, freeze_df, size_df)
+    insights = generate_insights(df_best, encoder_df, freeze_df, size_df, df_variation)
     print("\n" + "="*60)
     print("KEY INSIGHTS")
     print("="*60)

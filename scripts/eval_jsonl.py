@@ -7,7 +7,10 @@ import pandas as pd
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from peft import PeftModel
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_curve, det_curve
+import numpy as np
+from scipy.optimize import brentq
+from scipy.interpolate import interp1d
 
 # Add project root to path
 import sys
@@ -46,7 +49,10 @@ def load_model(checkpoint_dir, epoch, device):
     )
     
     # Load Projector Weights
-    proj_path = os.path.join(checkpoint_dir, f"proj_epoch_{epoch}.pt")
+    if epoch == "best":
+        proj_path = os.path.join(checkpoint_dir, f"proj_best.pt")
+    else:
+        proj_path = os.path.join(checkpoint_dir, f"proj_epoch_{epoch}.pt")
     if os.path.exists(proj_path):
         print(f"Loading projector weights from {proj_path}")
         model.speech_proj.load_state_dict(torch.load(proj_path, map_location="cpu"))
@@ -54,13 +60,19 @@ def load_model(checkpoint_dir, epoch, device):
         print(f"Warning: Projector weights not found at {proj_path}")
 
     # Load Audio Encoder Weights if they exist
-    audio_enc_path = os.path.join(checkpoint_dir, f"audio_encoder_epoch_{epoch}.pt")
+    if epoch == "best":
+        audio_enc_path = os.path.join(checkpoint_dir, f"audio_encoder_best.pt")
+    else:
+        audio_enc_path = os.path.join(checkpoint_dir, f"audio_encoder_epoch_{epoch}.pt")
     if os.path.exists(audio_enc_path):
         print(f"Loading audio encoder weights from {audio_enc_path}")
         model.audio_encoder.load_state_dict(torch.load(audio_enc_path, map_location="cpu"))
 
     # Load LoRA Weights
-    lora_path = os.path.join(checkpoint_dir, f"lora_epoch_{epoch}")
+    if epoch == "best":
+        lora_path = os.path.join(checkpoint_dir, f"lora_best")
+    else:
+        lora_path = os.path.join(checkpoint_dir, f"lora_epoch_{epoch}")
     if os.path.exists(lora_path) and config["model"].get("lora", True):
         print(f"Loading LoRA weights from {lora_path}")
         model.llm_model.load_adapter(lora_path, adapter_name="default")
@@ -99,8 +111,18 @@ def main(args):
     # Metrics tracking
     y_true = []
     y_pred = []
+    y_scores_real = [] # Probabilities of Real class
     hallucination_count = 0
     total_samples = 0
+    
+    # Identify token IDs for "Real" and "Fake"
+    token_real = model.tokenizer.encode("Real", add_special_tokens=False)
+    token_fake = model.tokenizer.encode("Fake", add_special_tokens=False)
+    
+    # Use the first token if multiple (though for "Real" it should be one)
+    real_token_id = token_real[0]
+    fake_token_id = token_fake[0]
+    print(f"Using Token IDs: Real={real_token_id} ({model.tokenizer.decode([real_token_id])}), Fake={fake_token_id} ({model.tokenizer.decode([fake_token_id])})")
     
     print(f"Starting evaluation on {len(dataset)} samples...")
     
@@ -120,8 +142,15 @@ def main(args):
                 "prompt": prompts
             }
             
-            # Generate
+            # 1. Generate Text (for Accuracy/F1)
             outputs = model.generate(samples, generate_cfg={"max_new_tokens": 50, "do_sample": False})
+            
+            # 2. Get Probabilities (for EER)
+            logits = model.get_last_token_logits(samples, prompts=prompts)
+            probs = torch.softmax(logits, dim=-1) # [B, V]
+            
+            batch_real_probs = probs[:, real_token_id].cpu().tolist()
+            batch_fake_probs = probs[:, fake_token_id].cpu().tolist()
             
             # Collect results
             for i in range(len(outputs)):
@@ -130,14 +159,18 @@ def main(args):
                 pred_text = outputs[i]
                 prompt = prompts[i]
                 
+                # EER Score Calculation
+                p_real = batch_real_probs[i]
+                p_fake = batch_fake_probs[i]
+                                
                 # Metric Calculation
                 total_samples += 1
                 
-                # Determine GT Label (1=Fake, 0=Real)
+                # Determine GT Label (1=Real, 0=Fake)
                 if "real" in gt_text.lower():
-                    gt_label = 0
-                elif "fake" in gt_text.lower():
                     gt_label = 1
+                elif "fake" in gt_text.lower():
+                    gt_label = 0
                 else:
                     gt_label = -1 
                 
@@ -147,9 +180,9 @@ def main(args):
                 is_pred_fake = "fake" in pred_lower and "real" not in pred_lower
                 
                 if is_pred_real:
-                    pred_label = 0
-                elif is_pred_fake:
                     pred_label = 1
+                elif is_pred_fake:
+                    pred_label = 0
                 else:
                     pred_label = -1 # Hallucination
                     hallucination_count += 1
@@ -157,30 +190,45 @@ def main(args):
                 if gt_label != -1:
                     y_true.append(gt_label)
                     y_pred.append(pred_label)
+                    y_scores_real.append(p_real)
 
                 results.append({
                     "path": path,
                     "ground_truth": gt_text,
                     "prediction": pred_text,
                     "prompt": prompt,
-                    "hallucination": pred_label == -1
+                    "hallucination": pred_label == -1,
+                    "score_real": p_real,
+                    "score_fake": p_fake,
                 })
-                print(f"Pred: {pred_text} | GT: {gt_text}")
+                print(f"Pred: {pred_text} | GT: {gt_text} | Score(Real): {p_real:.6f}")
 
     accuracy = accuracy_score(y_true, y_pred) if len(y_true) > 0 else 0
-    precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, labels=[1], average='micro', zero_division=0)
+    # Calculate Precision/Recall/F1 for Fake (Label 0)
+    precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, labels=[0], average='micro', zero_division=0)
     
+
+    # EER Calculation
+    eer = 0.0
+    if len(y_true) > 0:
+        fpr, fnr, thresholds = det_curve(y_true, y_scores_real)
+        index = np.nanargmin(np.absolute(fnr - fpr))
+        eer = fpr[index] + fnr[index]
+        eer = eer/2
+
     hallucination_rate = hallucination_count / total_samples if total_samples > 0 else 0
     
     cm_labels = [0, 1] 
 
-    tp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 1)
-    tn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 0)
-    fp = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 1)
-    fn = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp != 1) # Includes Real and Hallucinations
+    # Update counts for Real=1, Fake=0
+    # TP (Fake) = GT=0, Pred=0
+    tp_fake = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp == 0)
+    tn_fake = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 1)
+    fp_fake = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 1 and yp == 0)
+    fn_fake = sum(1 for yt, yp in zip(y_true, y_pred) if yt == 0 and yp != 0) 
     
-    num_fake_gt = sum(1 for x in y_true if x == 1)
-    num_real_gt = sum(1 for x in y_true if x == 0)
+    num_fake_gt = sum(1 for x in y_true if x == 0)
+    num_real_gt = sum(1 for x in y_true if x == 1)
 
     metrics = {
         "total_samples": total_samples,
@@ -190,10 +238,11 @@ def main(args):
         "precision_fake": precision,
         "recall_fake": recall,
         "f1_fake": f1,
-        "tp": tp,
-        "tn": tn,
-        "fp": fp,
-        "fn": fn,
+        "eer": eer,
+        "tp_fake": tp_fake,
+        "tn_fake": tn_fake,
+        "fp_fake": fp_fake,
+        "fn_fake": fn_fake,
         "num_fake_gt": num_fake_gt,
         "num_real_gt": num_real_gt
     }
@@ -206,6 +255,7 @@ def main(args):
     print(f"Precision (Fake): {precision:.4f}")
     print(f"Recall (Fake): {recall:.4f}")
     print(f"F1 Score (Fake): {f1:.4f}")
+    print(f"EER: {eer:.4f}")
     print("="*30)
 
     # Determine output CSV path based on input JSONL name
@@ -234,7 +284,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # parser.add_argument("--config", type=str, required=True, help="Path to config yaml") # Removed
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Directory containing checkpoints (output_dir)")
-    parser.add_argument("--epoch", type=int, required=True, help="Epoch number to load")
+    parser.add_argument("--epoch", type=str, required=False, default="best", help="Epoch number to load")
     parser.add_argument("--input_jsonl", type=str, required=True, help="Path to input JSONL file")
     parser.add_argument("--output_csv", type=str, default=None, help="Path to output CSV file (optional, defaults to <input_name>.csv in checkpoint_dir)")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")

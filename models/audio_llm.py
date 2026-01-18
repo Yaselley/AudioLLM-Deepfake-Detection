@@ -2,6 +2,7 @@ import logging
 import contextlib
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import sys
 import os
 from peft import LoraConfig, TaskType, get_peft_model
@@ -174,8 +175,51 @@ class AudioDeepfakeLLM(nn.Module):
         if self.audio_encoder_type == "whisper":
             self.audio_encoder = WhisperModel.from_pretrained(audio_encoder_path).encoder
             self.audio_dim = self.audio_encoder.config.d_model
-            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(audio_encoder_path)
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+        
+        elif self.audio_encoder_type == "whisper_ner":
+             # Initialize custom WhisperNER model
+            from .whisper_ner import Whisper, ModelDimensions
             
+            # Using Large-v3 dimensions by default
+            dims = ModelDimensions(
+                n_mels=128, 
+                n_audio_ctx=1500, 
+                n_audio_state=1280, 
+                n_audio_head=20, 
+                n_audio_layer=32, 
+                n_vocab=51865, 
+                n_text_ctx=448, 
+                n_text_state=1280, 
+                n_text_head=20, 
+                n_text_layer=32
+            )
+            
+            self.audio_encoder = Whisper(dims).encoder
+            
+            # Load weights if path is provided
+            if audio_encoder_path and os.path.exists(audio_encoder_path):
+                logging.info(f"Loading WhisperNER weights from {audio_encoder_path}")
+                checkpoint = torch.load(audio_encoder_path, map_location="cpu")
+                
+                # Handle keys if needed (strip "model.encoder." prefix)
+                new_state_dict = {}
+                for k, v in checkpoint.items():
+                    if k.startswith("model.encoder."):
+                        new_key = k.replace("model.encoder.", "")
+                        new_state_dict[new_key] = v
+
+                        
+                # Load with strict=False first to be safe, or True if you are sure
+                try:
+                    self.audio_encoder.load_state_dict(new_state_dict, strict=True)
+                except RuntimeError as e:
+                    logging.warning(f"Strict loading failed, trying strict=False: {e}")
+                    self.audio_encoder.load_state_dict(new_state_dict, strict=False)
+
+            self.audio_dim = 1280 # Large-v3 dimension
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+
         elif self.audio_encoder_type == "wav2vec2":
             if self.audio_encoder_source == "fairseq":
                 import fairseq
@@ -202,11 +246,25 @@ class AudioDeepfakeLLM(nn.Module):
             self.audio_encoder = Wav2Vec2BertModel.from_pretrained(audio_encoder_path)
             self.audio_dim = self.audio_encoder.config.hidden_size
             self.processor = AutoFeatureExtractor.from_pretrained(audio_encoder_path)
+
+        elif self.audio_encoder_type == "eat":
+            from deepfense.models.frontends.eat import EATWrapper
+            eat_config = {
+                "source": "huggingface",
+                "ckpt_path": audio_encoder_path,
+                "freeze": freeze_audio_encoder
+            }
+            self.audio_encoder = EATWrapper(eat_config)
+            # Try to infer dim
+            if hasattr(self.audio_encoder.model, "config"):
+                self.audio_dim = self.audio_encoder.model.config.embed_dim
+            else:
+                self.audio_dim = 1024 # EAT-large default
             
         else:
             raise ValueError(f"Unknown audio encoder type: {self.audio_encoder_type}")
 
-        if freeze_audio_encoder:
+        if freeze_audio_encoder and self.audio_encoder_type != "eat": # EAT handles freeze internally
             for param in self.audio_encoder.parameters():
                 param.requires_grad = False
             self.audio_encoder.eval()
@@ -223,10 +281,23 @@ class AudioDeepfakeLLM(nn.Module):
         """
         Computes the output length of the convolutional layers
         """
-        if self.audio_encoder_type == "whisper":
+        if self.audio_encoder_type in ["whisper", "whisper_ner"]:
             # Whisper: 16kHz -> 10ms stride (160 samples) -> Encoder
-            feat_lens = (input_lengths / 160).ceil().long()
-            return self.audio_encoder._get_feat_extract_output_lengths(feat_lens)
+            # Whisper NER shares the same architecture
+            
+            # Note: For custom Whisper implementation (whisper_ner), 
+            # we might need to manually calculate if the method doesn't exist
+            if hasattr(self.audio_encoder, "_get_feat_extract_output_lengths"):
+                 feat_lens = (input_lengths / 160).ceil().long()
+                 return self.audio_encoder._get_feat_extract_output_lengths(feat_lens)
+            else:
+                # Fallback calculation for Whisper convolution (Conv1d stride 1, then Conv1d stride 2)
+                # Input: [B, 80/128, T]
+                # Conv1: stride 1, padding 1 -> T
+                # Conv2: stride 2, padding 1 -> (T + 2*1 - 3)/2 + 1 = (T-1)/2 + 1 = floor((T-1)/2) + 1
+                # Usually simplified to T/2
+                feat_lens = (input_lengths / 160).ceil().long()
+                return (feat_lens + 1) // 2 
             
         elif self.audio_encoder_type == "wav2vec2-bert":
             # W2V-BERT 2.0 uses 160-dim fbank features extracted every 10ms (160 samples)
@@ -235,6 +306,12 @@ class AudioDeepfakeLLM(nn.Module):
             
             # 2. Map frames to encoder output (usually 4x subsampling)
             return self.audio_encoder._get_feat_extract_output_lengths(feat_lens)
+
+        elif self.audio_encoder_type == "eat":
+            feat_lens = (input_lengths / 160).floor().long()
+            t_patches = (feat_lens / 16).floor().long()
+            # 8 freq patches + 1 CLS
+            return t_patches * 8 + 1
             
         elif hasattr(self.audio_encoder, "_get_feat_extract_output_lengths"):
             return self.audio_encoder._get_feat_extract_output_lengths(input_lengths)
@@ -261,7 +338,7 @@ class AudioDeepfakeLLM(nn.Module):
             
         speech_lens = self._get_feat_extract_output_lengths(input_lengths)
         
-        if self.audio_encoder_type == "whisper":
+        if self.audio_encoder_type in ["whisper", "whisper_ner"]:
             # Whisper expects log-mel spectrograms of specific length
             with torch.no_grad():
                 raw_wav_cpu = raw_wav.cpu().numpy()
@@ -274,10 +351,16 @@ class AudioDeepfakeLLM(nn.Module):
                     truncation=True
                 )
                 input_features = inputs.input_features.to(device)
-                
+            
             # Forward pass through Whisper Encoder
+            # For standard HF Whisper, it returns object with last_hidden_state
+            # For custom WhisperNER, it might return tensor directly
             outputs = self.audio_encoder(input_features)
-            hidden_states = outputs.last_hidden_state # [B, 1500, D]
+            
+            if isinstance(outputs, torch.Tensor):
+                hidden_states = outputs
+            else:
+                hidden_states = outputs.last_hidden_state # [B, 1500, D]
             
             # Clamp speech_lens to 1500 just in case
             speech_lens = torch.clamp(speech_lens, max=1500)
@@ -344,6 +427,21 @@ class AudioDeepfakeLLM(nn.Module):
                 attention_mask=attention_mask
             )
             return outputs.last_hidden_state, speech_lens
+
+        elif self.audio_encoder_type == "eat":
+            # Padding management for patch-based processing
+            # 1 frame = 10ms = 160 samples
+            # Patch time dim = 16 frames
+            # Block size = 16 * 160 = 2560 samples
+            
+            if raw_wav.dtype != torch.float32:
+                raw_wav_input = raw_wav.to(torch.float32)
+            else:
+                raw_wav_input = raw_wav
+
+            hidden_states = self.audio_encoder(raw_wav_input)
+            
+            return hidden_states, speech_lens
             
         return None, None
 
@@ -601,6 +699,55 @@ class AudioDeepfakeLLM(nn.Module):
             return {"loss": loss}
             
         return {"loss": loss}
+
+    def get_last_token_logits(self, samples, prompts=None):
+        raw_wav = samples["raw_wav"]
+        audio_attention_mask = samples.get("audio_attention_mask", None)
+        
+        # Encode
+        speech_embeds, speech_lens = self.encode_speech(raw_wav, audio_attention_mask)
+        
+        # Prepare Prompts
+        if prompts is None:
+            if "prompt" in samples:
+                prompts = samples["prompt"]
+            else:
+                 raise ValueError("Prompts must be provided")
+
+        multi_prompt = isinstance(prompts, list)
+
+        # Prepare BOS
+        batch_size = speech_embeds.shape[0]
+        bos_token_id = self.tokenizer.bos_token_id if self.tokenizer.bos_token_id else self.tokenizer.eos_token_id
+        
+        bos = torch.ones(
+            [batch_size, 1],
+            dtype=torch.long,
+            device=speech_embeds.device,
+        ) * bos_token_id
+        bos_embeds = self._get_text_embeds(bos)
+
+        # Wrap with Left Padding and Prefix (BOS)
+        inputs_embeds, attention_mask = self.prompt_wrap(
+            speech_embeds, 
+            speech_lens, 
+            prompts, 
+            multi_prompt=multi_prompt, 
+            padding_side="left",
+            prefix_embeds=bos_embeds
+        )
+        
+        # Forward pass
+        outputs = self.llm_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            return_dict=True
+        )
+        
+        # Get logits of the last token
+        last_token_logits = outputs.logits[:, -1, :]
+        
+        return last_token_logits
 
     def generate(self, samples, generate_cfg={}, prompts=None):
         raw_wav = samples["raw_wav"]
