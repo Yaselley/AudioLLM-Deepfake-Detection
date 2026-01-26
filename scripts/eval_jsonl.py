@@ -16,13 +16,13 @@ from scipy.interpolate import interp1d
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.audio_llm import AudioDeepfakeLLM
+from models.audioTokens_llm import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
 
 from huggingface_hub import login
 login(token="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")
 
-def load_model(checkpoint_dir, epoch, device):
+def load_model(checkpoint_dir, epoch, device, compile_model=False):
     # Load Config
     config_path = os.path.join(checkpoint_dir, "config.json")
     if os.path.exists(config_path):
@@ -40,6 +40,8 @@ def load_model(checkpoint_dir, epoch, device):
         audio_encoder_type=model_cfg.get("audio_encoder_type", "whisper"),
         audio_encoder_source=model_cfg.get("audio_encoder_source", "huggingface"),
         freeze_audio_encoder=model_cfg.get("freeze_audio_encoder", True),
+        speechtokenizer_num_layers=model_cfg.get("speechtokenizer_num_layers", 8),
+        speechtokenizer_codebook_size=model_cfg.get("speechtokenizer_codebook_size", 1024),
         lora=model_cfg.get("lora", True),
         lora_rank=model_cfg.get("lora_rank", 64),
         lora_alpha=model_cfg.get("lora_alpha", 16),
@@ -48,16 +50,19 @@ def load_model(checkpoint_dir, epoch, device):
         device_8bit=0 
     )
     
-    # Load Projector Weights
-    if epoch == "best":
-        proj_path = os.path.join(checkpoint_dir, f"proj_best.pt")
+    # Load Projector Weights (only if it exists - not for SpeechTokenizer)
+    if model.speech_proj is not None:
+        if epoch == "best":
+            proj_path = os.path.join(checkpoint_dir, f"proj_best.pt")
+        else:
+            proj_path = os.path.join(checkpoint_dir, f"proj_epoch_{epoch}.pt")
+        if os.path.exists(proj_path):
+            print(f"Loading projector weights from {proj_path}")
+            model.speech_proj.load_state_dict(torch.load(proj_path, map_location="cpu"))
+        else:
+            print(f"Warning: Projector weights not found at {proj_path}")
     else:
-        proj_path = os.path.join(checkpoint_dir, f"proj_epoch_{epoch}.pt")
-    if os.path.exists(proj_path):
-        print(f"Loading projector weights from {proj_path}")
-        model.speech_proj.load_state_dict(torch.load(proj_path, map_location="cpu"))
-    else:
-        print(f"Warning: Projector weights not found at {proj_path}")
+        print("No projector layer (using SpeechTokenizer with discrete tokens)")
 
     # Load Audio Encoder Weights if they exist
     if epoch == "best":
@@ -68,26 +73,49 @@ def load_model(checkpoint_dir, epoch, device):
         print(f"Loading audio encoder weights from {audio_enc_path}")
         model.audio_encoder.load_state_dict(torch.load(audio_enc_path, map_location="cpu"))
 
-    # Load LoRA Weights
-    if epoch == "best":
-        lora_path = os.path.join(checkpoint_dir, f"lora_best")
+    # Load LoRA Weights or Full Model Checkpoint
+    use_lora = config["model"].get("lora", True)
+    
+    if use_lora:
+        # Load LoRA adapters
+        if epoch == "best":
+            lora_path = os.path.join(checkpoint_dir, f"lora_best")
+        else:
+            lora_path = os.path.join(checkpoint_dir, f"lora_epoch_{epoch}")
+        if os.path.exists(lora_path):
+            print(f"Loading LoRA weights from {lora_path}")
+            model.llm_model.load_adapter(lora_path, adapter_name="default")
+        else:
+            print(f"Warning: LoRA weights not found at {lora_path}")
     else:
-        lora_path = os.path.join(checkpoint_dir, f"lora_epoch_{epoch}")
-    if os.path.exists(lora_path) and config["model"].get("lora", True):
-        print(f"Loading LoRA weights from {lora_path}")
-        model.llm_model.load_adapter(lora_path, adapter_name="default")
-    else:
-        print(f"Warning: LoRA weights not found at {lora_path} or LoRA disabled.")
+        # Load full model checkpoint (when LoRA is disabled, full model is saved)
+        if epoch == "best":
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_best.pt")
+        else:
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
+        if os.path.exists(checkpoint_path):
+            print(f"Loading full model checkpoint from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            # Load the full state dict
+            model.load_state_dict(checkpoint, strict=False)
+        else:
+            print(f"Warning: Full model checkpoint not found at {checkpoint_path}")
 
     model.to(device)
     model.eval()
+    
+    # Compile model for faster inference (PyTorch 2.0+)
+    # if hasattr(torch, 'compile') and compile_model:
+    #     print("Compiling model with torch.compile()...")
+    model = torch.compile(model, mode="reduce-overhead")
+    
     return model
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load Model
-    model = load_model(args.checkpoint_dir, args.epoch, device)
+    model = load_model(args.checkpoint_dir, args.epoch, device, compile_model=args.compile)
     
     # Load Dataset
     # We use AudioDeepfakeDataset but we might want to override prompts to be fixed for evaluation
@@ -152,6 +180,9 @@ def main(args):
             batch_real_probs = probs[:, real_token_id].cpu().tolist()
             batch_fake_probs = probs[:, fake_token_id].cpu().tolist()
             
+            logits_real = logits[:, real_token_id].cpu().tolist()
+            logits_fake = logits[:, fake_token_id].cpu().tolist()
+
             # Collect results
             for i in range(len(outputs)):
                 path = batch["path"][i]
@@ -200,8 +231,10 @@ def main(args):
                     "hallucination": pred_label == -1,
                     "score_real": p_real,
                     "score_fake": p_fake,
+                    "logits_real": logits_real,
+                    "logits_fake": logits_fake,
                 })
-                print(f"Pred: {pred_text} | GT: {gt_text} | Score(Real): {p_real:.6f}")
+                # print(f"Pred: {pred_text} | GT: {gt_text} | Score(Real): {p_real:.6f}")
 
     accuracy = accuracy_score(y_true, y_pred) if len(y_true) > 0 else 0
     # Calculate Precision/Recall/F1 for Fake (Label 0)
@@ -288,6 +321,10 @@ if __name__ == "__main__":
     parser.add_argument("--input_jsonl", type=str, required=True, help="Path to input JSONL file")
     parser.add_argument("--output_csv", type=str, default=None, help="Path to output CSV file (optional, defaults to <input_name>.csv in checkpoint_dir)")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of data loader workers")
+    parser.add_argument("--mixed_precision", type=str, default=None, choices=[None, 'fp16', 'bf16'], help="Use mixed precision: 'fp16' or 'bf16' (faster inference, requires CUDA)")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile() for faster inference (PyTorch 2.0+)")
+    parser.add_argument("--disable_tqdm", action="store_true", help="Disable progress bar for faster output")
     parser.add_argument("--prompt", type=str, default="Listen to this audio clip: <Speech><SpeechHere></Speech>. Is this audio real or fake?", help="Prompt to use for evaluation")
     
     args = parser.parse_args()

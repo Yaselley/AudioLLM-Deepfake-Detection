@@ -13,7 +13,7 @@ import numpy as np
 import random
 from sklearn.metrics import accuracy_score
 
-from models.audio_llm import AudioDeepfakeLLM
+from models_clean.audiollm_base import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
 
 def set_seed(seed):
