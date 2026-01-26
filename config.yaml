@@ -2,17 +2,21 @@ model:
   # LLM Settings
   # llm_path: "meta-llama/Llama-3.1-8B-Instruct" 
   # llm_type: "llama" # "qwen2", "qwen3", "llama"
-  llm_path: "Qwen/Qwen2.5-7B-Instruct" 
-  llm_type: "qwen2" # "qwen2", "qwen3", "llama"
+  llm_path: "Qwen/Qwen3-14B" 
+  llm_type: "qwen3" # "qwen2", "qwen3", "llama"
 
   # Audio Encoder Settings
-  # audio_encoder_path: "openai/whisper-large-v2"
-  # audio_encoder_type: "whisper" 
+  audio_encoder_path: "openai/whisper-large-v3-turbo"
+  audio_encoder_type: "whisper" 
+
+  # audio_encoder_path: "facebook/w2v-bert-2.0"
+  # audio_encoder_type: "wav2vec2-bert"
+  # audio_encoder_source: "huggingface" # "huggingface" or "fairseq"
   
   # For Fairseq Wav2Vec2
   # audio_encoder_path: "/netscratch/yelkheir/ssl_models/xlsr2_300m.pt"
   # audio_encoder_type: "wav2vec2"
-  # audio_encoder_source: "fairseq" # "huggingface" or "fairseq" or "unil"
+  # audio_encoder_source: "fairseq" # "huggingface" or "fairseq"
 
   # For UniL/Microsoft WavLM
   # audio_encoder_path: "/netscratch/yelkheir/DeepFense/DeepFense/deepfense/models/frontends/WavLM-Large.pt"
@@ -31,17 +35,19 @@ model:
   special_tokens: [] # e.g. ["<SpeechHere>"] if not already handled by logic
 
 data:
-  train_path: "data/train.jsonl"
-  val_path: "data/val.jsonl"
+  train_path: "data/asv19_train.jsonl"
+  val_path: "data/asv19_val.jsonl"
   prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 4
+  batch_size: 2
   epochs: 5
   lr: 1e-4          # Global fallback LR
-  lr_adapter: 1e-4  
-  lr_audio: 1e-5    # Lower LR for full fine-tuning of Whisper
-  lr_lora: 2e-4     # Standard LoRA LR
+  lr_adapter: 1e-5  
+  lr_audio: 1e-6    # Lower LR for full fine-tuning of Whisper
+  lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
+  seed: 42
+  grad_accum_steps: 4
 
-output_dir: "output_v3"
+output_dir: "output_v6"

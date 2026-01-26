@@ -48,7 +48,7 @@ class Wav2Vec2Encoder(BaseSpeechEncoder):
             if self.encoder_source == "fairseq":
                 raise ValueError("Weighted layer pooling is only supported for HuggingFace wav2vec2 models.")
             from .weighted_layer_pooling import WeightedLayerPooling
-            num_layers = int(getattr(self.encoder.config, "num_hidden_layers", 0)) + 1
+            num_layers = 24
             self.layer_pooler = WeightedLayerPooling(num_layers=num_layers, norm=self.weighted_layer_norm)
         
         if freeze:
