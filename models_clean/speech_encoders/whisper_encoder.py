@@ -72,6 +72,10 @@ class WhisperEncoder(BaseSpeechEncoder):
         
         if freeze:
             self.freeze_encoder()
+            # Ensure layer_pooler remains trainable even when encoder is frozen
+            if self.layer_pooler is not None:
+                for param in self.layer_pooler.parameters():
+                    param.requires_grad = True
     
     def encode(self, raw_wav: torch.Tensor, audio_attention_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         device = raw_wav.device

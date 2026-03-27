@@ -159,7 +159,7 @@ def find_all_csv_files(base_dirs):
             continue
         
         # Find all CSV files ending with '_best.csv'
-        for csv_file in base_path.rglob('*_best.csv'):
+        for csv_file in base_path.rglob('*_best_42.csv'):
             # Get relative path from base_dir
             rel_path = csv_file.relative_to(base_path)
             csv_files.append((csv_file, rel_path))
@@ -211,8 +211,7 @@ def extract_dataset_name(csv_filename):
 def main():
     # Base directories to search
     base_dirs = [
-        '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/suite',
-        '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/suite2'
+        "/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/suite_prompt",
     ]
     
     print("Finding all CSV files...")
@@ -293,7 +292,7 @@ def main():
     print(df_summary.to_string(index=False))
     
     # Save to CSV
-    output_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_summary.csv'
+    output_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_summary_prompt.csv'
     df_summary.to_csv(output_csv, index=False)
     print(f"\nSummary saved to: {output_csv}")
     
@@ -429,7 +428,7 @@ def main():
     print(df_config_avg.to_string(index=False))
     
     # Save averaged results to CSV
-    output_avg_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_averaged.csv'
+    output_avg_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_averaged_prompt.csv'
     df_config_avg.to_csv(output_avg_csv, index=False)
     print(f"\nAveraged results saved to: {output_avg_csv}")
     
@@ -501,7 +500,7 @@ def main():
     print(df_config_seed_avg.to_string(index=False))
     
     # Save seed-averaged results to CSV
-    output_seed_avg_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_averaged_across_seeds.csv'
+    output_seed_avg_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_averaged_across_seeds_prompt.csv'
     df_config_seed_avg.to_csv(output_seed_avg_csv, index=False)
     print(f"\nSeed-averaged results saved to: {output_seed_avg_csv}")
     

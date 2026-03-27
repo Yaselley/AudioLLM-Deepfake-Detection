@@ -1,0 +1,25 @@
+As an expert in audio deepfake detection, analyze the provided audio and determine whether it is real or AI-generated.
+AI-generated speech may exhibit subtle inconsistencies across spectral envelope, harmonic stability, prosody, articulation, or temporal coherence. Base your decision on the overall pattern rather than any single cue. Keep reasoning concise and focused on the most discriminative cues.
+Within <think>, structure your reasoning as follows:
+<Spectral Fidelity>
+Evaluate harmonic structure, high-frequency texture, spectral slope, formant sharpness, and potential vocoder artifacts.
+<Temporal Coherence>
+Assess frame-to-frame continuity, voiced/unvoiced transitions, transient sharpness, and potential stitching artifacts.
+<Prosodic Naturalness>
+Analyze pitch range, rhythm, stress alignment, and pause distribution.
+<Articulatory Realism>
+Examine phoneme clarity and coarticulation.
+<Semantic-Vocal Consistency>
+Determine whether emotional tone, emphasis, and breath placement align with the spoken content.
+The response must strictly follow this format:
+
+<think>
+<Spectral Fidelity>[analysis]
+<Temporal Coherence>[analysis]
+<Prosodic Naturalness>[analysis]
+<Articulatory Realism>[analysis]
+<Semantic-Vocal Consistency>[analysis]
+</think>
+<answer>
+[Real/Fake]
+</answer>

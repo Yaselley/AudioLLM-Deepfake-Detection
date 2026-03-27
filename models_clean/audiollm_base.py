@@ -109,6 +109,10 @@ class AudioDeepfakeLLM(nn.Module):
         self.low_resource = low_resource
         self.llm_type = llm_type.lower()
         
+        logging.info(f'lora: {lora}')
+        logging.info(f'lora_rank: {lora_rank}')
+        logging.info(f'lora_alpha: {lora_alpha}')
+        logging.info(f'lora_dropout: {lora_dropout}')
         # ====================
         # 1. Load Tokenizer & LLM
         # ====================
@@ -167,6 +171,8 @@ class AudioDeepfakeLLM(nn.Module):
 
         # Weighted layer pooling (only for Whisper / Wav2Vec2)
         if audio_encoder_type.lower() in {"whisper", "whisper_ner", "wav2vec2", "wav2vec2-bert"}:
+            print(f"use_weighted_layer_sum: {use_weighted_layer_sum}")
+            print(f"weighted_layer_norm: {weighted_layer_norm}")
             encoder_kwargs.update({
                 "use_weighted_layer_sum": use_weighted_layer_sum,
                 "weighted_layer_norm": weighted_layer_norm,

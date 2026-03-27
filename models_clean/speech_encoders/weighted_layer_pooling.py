@@ -54,12 +54,8 @@ class WeightedLayerPooling(nn.Module):
 
         # Optional normalization over layers (channels=L).
         if self.bn is not None:
-            # Reshape to (N, C) where C=L and N=B*T*D
-            # x: [B, L, T, D] -> [B, T, D, L] -> [B*T*D, L]
             b, l, t, d = x.shape
-            x_bn = x.permute(0, 2, 3, 1).contiguous().view(-1, l)
-            x_bn = self.bn(x_bn)
-            x = x_bn.view(b, t, d, l).permute(0, 3, 1, 2).contiguous()
+            x = self.bn(x)
 
         weights = torch.softmax(self.layer_weights, dim=0).to(dtype=x.dtype)  # [L]
         pooled = (x * weights.view(1, -1, 1, 1)).sum(dim=1)  # [B, T, D]

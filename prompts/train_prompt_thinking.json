@@ -1,0 +1,5 @@
+{
+    "deepfake_detection": [
+        "Listen to this audio clip: <Speech><SpeechHere></Speech> <OPENSMILE>. Is this audio real or fake?"
+    ]
+}

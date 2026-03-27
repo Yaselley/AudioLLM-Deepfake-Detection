@@ -13,7 +13,7 @@ import numpy as np
 import random
 from sklearn.metrics import accuracy_score
 
-from models_clean.audiollm_base import AudioDeepfakeLLM
+from models_clean.audiollm_base_opensmile import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
 
 def set_seed(seed):
@@ -117,6 +117,10 @@ def main(args):
         # SQ-Codec parameters
         sqcodec_num_quantizers=model_cfg.get("sqcodec_num_quantizers", 4),
         sqcodec_num_levels=model_cfg.get("sqcodec_num_levels", 4096),
+
+        use_opensmile=model_cfg.get("use_opensmile", False),
+        opensmile_only=model_cfg.get("opensmile_only", False),
+
     )
     model.to(device)
     
@@ -157,12 +161,16 @@ def main(args):
     audio_enc_param_count = 0
     adapter_param_count = 0
     llm_param_count = 0
+    layer_pooler_param_count = 0
     
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
             
         if "audio_encoder" in name:
+            # Check if it's layer_pooler (should be trainable even if encoder is frozen)
+            if "layer_pooler" in name:
+                layer_pooler_param_count += param.numel()
             audio_enc_params.append(param)
             audio_enc_param_count += param.numel()
         elif "speech_proj" in name and model.speech_proj is not None:
@@ -175,6 +183,8 @@ def main(args):
     logging.info("="*30)
     logging.info(f"Trainable Parameters Info:")
     logging.info(f"  Audio Encoder Params:   {audio_enc_param_count:,} (LR: {config['train'].get('lr_audio', config['train'].get('lr', 1e-4))})")
+    if layer_pooler_param_count > 0:
+        logging.info(f"    └─ Layer Pooler:      {layer_pooler_param_count:,} (trainable)")
     logging.info(f"  Audio Adapter Params:   {adapter_param_count:,} (LR: {config['train'].get('lr_adapter', config['train'].get('lr', 1e-4))})")
     logging.info(f"  LLM/LoRA Params:        {llm_param_count:,} (LR: {config['train'].get('lr_lora', config['train'].get('lr', 1e-4))})")
     logging.info(f"  Total Trainable Params: {audio_enc_param_count + adapter_param_count + llm_param_count:,}")
@@ -232,9 +242,19 @@ def main(args):
             
             total_loss += loss.item() * grad_accum_steps
             
-            if step % 10 == 0:
+            if step % 1000 == 0:
                 logging.info(f"Epoch {epoch+1}/{num_epochs} | Step {step}/{len(train_loader)} | Loss: {loss.item() * grad_accum_steps:.4f}")
         
+                # Print weighted layer pooling weights if enabled
+                if config["model"].get("use_weighted_layer_sum", False):
+                    if hasattr(model.audio_encoder, 'layer_pooler') and model.audio_encoder.layer_pooler is not None:
+                        raw_weights = model.audio_encoder.layer_pooler.layer_weights.data.cpu().numpy()
+                        softmax_weights = torch.softmax(model.audio_encoder.layer_pooler.layer_weights, dim=0).data.cpu().numpy()
+                        logging.info(f"Epoch {epoch+1} - Weighted Layer Pooling Weights:")
+                        logging.info(f"  Raw weights: {raw_weights}")
+                        logging.info(f"  Softmax weights: {softmax_weights}")
+                        logging.info(f"  Layer with max weight: Layer {softmax_weights.argmax()}")
+            
         avg_train_loss = total_loss / len(train_loader)
         epoch_time = time.time() - start_time
         logging.info(f"Epoch {epoch+1} Complete. Avg Train Loss: {avg_train_loss:.4f} | Time: {epoch_time:.2f}s")
@@ -257,10 +277,10 @@ def main(args):
                 }
                 outputs = model(samples)
                 val_loss += outputs["loss"].item()
-        
         avg_val_loss = val_loss / len(val_loader)
         logging.info(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
         
+
         # Check if this is the best validation loss
         is_best = avg_val_loss < best_val_loss
         if is_best:
@@ -271,27 +291,34 @@ def main(args):
         # Save Checkpoint (always save, but mark best)
         if config["model"].get("lora", True):
             # Save regular checkpoint
-            model.llm_model.save_pretrained(os.path.join(output_dir, f"lora_epoch_{epoch+1}"))
+            # model.llm_model.save_pretrained(os.path.join(output_dir, f"lora_epoch_{epoch+1}"))
             
-            # Save speech projection if it exists (not for SpeechTokenizer)
-            if model.speech_proj is not None:
-                torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, f"proj_epoch_{epoch+1}.pt"))
+            # # Save speech projection if it exists (not for SpeechTokenizer)
+            # if model.speech_proj is not None:
+            #     torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, f"proj_epoch_{epoch+1}.pt"))
 
-            # Save Audio Encoder if not frozen
-            if not config["model"].get("freeze_audio_encoder", True):
-                 torch.save(model.audio_encoder.state_dict(), os.path.join(output_dir, f"audio_encoder_epoch_{epoch+1}.pt"))
-            
+            # # Save Audio Encoder if it has trainable params:
+            # # - encoder not frozen, OR
+            # # - use_weighted_layer_sum (layer_pooler is trainable even when encoder frozen)
+            save_audio_encoder = (
+                not config["model"].get("freeze_audio_encoder", True)
+                or config["model"].get("use_weighted_layer_sum", False)
+            )
+
+            # if save_audio_encoder:
+            #     torch.save(model.audio_encoder.state_dict(), os.path.join(output_dir, f"audio_encoder_epoch_{epoch+1}.pt"))
+
             # Save best checkpoint (overwrite previous best)
             if is_best:
                 model.llm_model.save_pretrained(os.path.join(output_dir, "lora_best"))
                 if model.speech_proj is not None:
                     torch.save(model.speech_proj.state_dict(), os.path.join(output_dir, "proj_best.pt"))
-                if not config["model"].get("freeze_audio_encoder", True):
+                if save_audio_encoder:
                     torch.save(model.audio_encoder.state_dict(), os.path.join(output_dir, "audio_encoder_best.pt"))
                 logging.info(f"Saved best checkpoint (epoch {best_epoch}) with val_loss: {best_val_loss:.4f}")
         else:
             # Save regular checkpoint
-            torch.save(model.state_dict(), os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt"))
+            # torch.save(model.state_dict(), os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt"))
             
             # Save best checkpoint
             if is_best:

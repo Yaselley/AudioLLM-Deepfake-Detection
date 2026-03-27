@@ -47,6 +47,9 @@ def normalize_dataset_name(dataset_str):
         return 'ASV19'
     elif 'itw' in dataset_str:
         return 'ITW'
+    elif 'la21' in dataset_str:
+        return 'LA21'
+
     elif 'mlaad' in dataset_str:
         return 'MLAAD'
     return dataset_str
@@ -70,7 +73,7 @@ def create_results_table(json_path, output_csv):
     # Organize data: encoder -> frozen_status -> llm -> dataset -> metrics
     organized = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
     
-    target_datasets = ['ASV19', 'ITW', 'MLAAD']
+    target_datasets = ['ASV19', 'ITW', 'LA21', 'MLAAD']
     target_llms = ['Qwen-0.5', 'Qwen-3', 'Qwen-7']
     
     # Extract data from JSON - ONLY use pre-averaged 'avg' entries (already averaged across seeds)
@@ -124,7 +127,7 @@ def create_results_table(json_path, output_csv):
     # Header row 2: Dataset names, each spanning 3 columns (ACC, F1, EER)
     header2 = ['']
     for _ in range(3):  # For each LLM
-        for dataset in ['ASV19', 'ITW', 'MLAAD', 'AVG']:
+        for dataset in ['ASV19', 'ITW', 'LA21', 'MLAAD', 'AVG']:
             header2.append(dataset)  # Dataset name in first column
             header2.extend(['', ''])  # Empty for F1 and EER columns
     rows.append(header2)
@@ -204,5 +207,5 @@ def create_results_table(json_path, output_csv):
 
 if __name__ == "__main__":
     json_path = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/all_results_organized.json'
-    output_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/results_table.csv'
+    output_csv = '/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/outputs/results_table_prompt.csv'
     create_results_table(json_path, output_csv)

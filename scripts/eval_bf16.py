@@ -1,5 +1,6 @@
 import os
 import argparse
+import logging
 import torch
 import json
 import pandas as pd
@@ -9,6 +10,9 @@ import numpy as np
 from contextlib import nullcontext
 import random
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_curve, det_curve
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
 
 
 def set_seed(seed=42):
@@ -34,7 +38,7 @@ set_seed(42)
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models_clean.audiollm_base import AudioDeepfakeLLM
+from models_clean.audiollm_base_opensmile import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
 
 from huggingface_hub import login
@@ -93,6 +97,11 @@ def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False
         # SQ-Codec parameters
         sqcodec_num_quantizers=model_cfg.get("sqcodec_num_quantizers", 4),
         sqcodec_num_levels=model_cfg.get("sqcodec_num_levels", 4096),
+        use_weighted_layer_sum = model_cfg.get("use_weighted_layer_sum", False),
+        weighted_layer_norm = model_cfg.get("weighted_layer_norm", "none"),
+
+        use_opensmile=model_cfg.get("use_opensmile", False),
+        opensmile_only=model_cfg.get("opensmile_only", False),
     )
     
     # Load Projector Weights
@@ -102,11 +111,100 @@ def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False
             print(f"Loading projector weights from {proj_path}")
             model.speech_proj.load_state_dict(torch.load(proj_path, map_location="cpu", weights_only=True))
     
+    # # Load Audio Encoder Weights (required for use_weighted_layer_sum: layer_pooler weights)
+    # audio_enc_path = os.path.join(checkpoint_dir, f"audio_encoder_{epoch}.pt")
+    # if os.path.exists(audio_enc_path):
+    #     print(f"Loading audio encoder weights from {audio_enc_path}")
+    #     model.audio_encoder.load_state_dict(torch.load(audio_enc_path, map_location="cpu", weights_only=True))
+    # elif model_cfg.get("use_weighted_layer_sum", False):
+    #     print(
+    #         "WARNING: use_weighted_layer_sum=True but audio_encoder_{} not found. "
+    #         "Layer-pooler weights are untrained (init). Re-train with updated train_tokens.py to save them.".format(epoch)
+    #     )
+
+    # Load Audio Encoder Weights (required for use_weighted_layer_sum: layer_pooler weights)
+    # audio_enc_path = os.path.join(checkpoint_dir, f"audio_encoder_{epoch}.pt")
+    # if os.path.exists(audio_enc_path):
+    #     print(f"Loading audio encoder weights from {audio_enc_path}")
+    #     # Load raw dictionary
+    #     audio_state_dict = torch.load(audio_enc_path, map_location="cpu", weights_only=True)
+        
+    #     # Create a new dictionary to fix the keys
+    #     fixed_state_dict = {}
+    #     for k, v in audio_state_dict.items():
+    #         # The error shows model expects "encoder.conv1..." but file has "conv1..."
+    #         # We explicitly add the prefix if it's missing
+    #         if not k.startswith("encoder."):
+    #             new_key = f"encoder.{k}"
+    #         else:
+    #             new_key = k
+    #         fixed_state_dict[new_key] = v
+            
+    #     # Load the fixed dictionary
+    #     # We use strict=False to avoid crashing on minor unused keys, but print the result
+    #     load_result = model.audio_encoder.load_state_dict(fixed_state_dict, strict=False)
+        
+    #     print("Audio Encoder loaded.")
+    #     if len(load_result.missing_keys) > 0:
+    #         print(f"WARNING: Missing keys in audio_encoder: {load_result.missing_keys[:5]} ...")
+    #     if len(load_result.unexpected_keys) > 0:
+    #         print(f"WARNING: Unexpected keys in audio_encoder: {load_result.unexpected_keys[:5]} ...")
+
+    # elif model_cfg.get("use_weighted_layer_sum", False):
+    #     print(
+    #         "WARNING: use_weighted_layer_sum=True but audio_encoder_{} not found. "
+    #         "Layer-pooler weights are untrained (init). Re-train with updated train_tokens.py to save them.".format(epoch)
+    #     )
+
     # Load Audio Encoder Weights
     audio_enc_path = os.path.join(checkpoint_dir, f"audio_encoder_{epoch}.pt")
     if os.path.exists(audio_enc_path):
         print(f"Loading audio encoder weights from {audio_enc_path}")
-        model.audio_encoder.load_state_dict(torch.load(audio_enc_path, map_location="cpu", weights_only=True))
+        state_dict = torch.load(audio_enc_path, map_location="cpu", weights_only=True)
+        
+        # --- FIX: Intelligent Key Matching ---
+        # Get the actual keys your current model expects
+        model_state_dict = model.audio_encoder.state_dict()
+        expected_keys = set(model_state_dict.keys())
+        fixed_state_dict = {}
+        
+        print("Adapting checkpoint keys to model structure...")
+        
+        for k, v in state_dict.items():
+            # Create a list of possible key names to try
+            candidates = [
+                k,                                         # 1. Try exact match
+                f"encoder.{k}",                            # 2. Try adding one 'encoder.' prefix
+                f"encoder.encoder.{k}",                    # 3. Try adding two 'encoder.' prefixes
+                k.replace("encoder.", "encoder.encoder.")  # 4. Try injecting nested encoder
+            ]
+            
+            match_found = False
+            for cand in candidates:
+                if cand in expected_keys:
+                    # Verify shape matches to be safe
+                    if model_state_dict[cand].shape == v.shape:
+                        fixed_state_dict[cand] = v
+                        match_found = True
+                        break
+            
+            # If we couldn't find a target, keep original (will show in unexpected list)
+            if not match_found:
+                fixed_state_dict[k] = v
+
+        # Load the fixed dictionary
+        load_result = model.audio_encoder.load_state_dict(fixed_state_dict, strict=False)
+        
+        print(f"Audio Encoder loaded. Missing: {len(load_result.missing_keys)}, Unexpected: {len(load_result.unexpected_keys)}")
+        if len(load_result.missing_keys) > 0:
+            print(f"First 5 missing keys: {load_result.missing_keys[:5]}")
+        # -------------------------------------
+
+    elif model_cfg.get("use_weighted_layer_sum", False):
+        print(
+            "WARNING: use_weighted_layer_sum=True but audio_encoder_{} not found. "
+            "Layer-pooler weights are untrained (init). Re-train with updated train_tokens.py to save them.".format(epoch)
+        )
 
     # Load LoRA or Full Model
     use_lora = config["model"].get("lora", True)
@@ -120,7 +218,48 @@ def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False
         if os.path.exists(checkpoint_path):
             print(f"Loading checkpoint from {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            model.load_state_dict(checkpoint, strict=False)
+            # Manual loading with key renaming to avoid shape mismatch (Fairseq vs HF, encoder nesting, LLM wrapping)
+            model_state_dict = model.state_dict()
+            pretrained_dict = {}
+            shape_mismatch_keys = []
+            for k, v in checkpoint.items():
+                candidates = [k]
+                if "audio_encoder.encoder.encoder." in k:
+                    candidates.append(k.replace("audio_encoder.encoder.encoder.", "audio_encoder.encoder."))
+                if "audio_encoder.encoder." in k and "audio_encoder.encoder.encoder." not in k:
+                    candidates.append(k.replace("audio_encoder.encoder.", "audio_encoder.encoder.encoder."))
+                if "audio_encoder.layers." in k:
+                    candidates.append(k.replace("audio_encoder.layers.", "audio_encoder.encoder.layers."))
+                if "audio_encoder.encoder.layers." in k:
+                    candidates.append(k.replace("audio_encoder.encoder.layers.", "audio_encoder.layers."))
+                if "llm_model.base_model.model.model." in k:
+                    candidates.append(k.replace("llm_model.base_model.model.model.", "llm_model.model."))
+                match_found = False
+                for cand in candidates:
+                    if cand in model_state_dict:
+                        if v.shape == model_state_dict[cand].shape:
+                            pretrained_dict[cand] = v
+                            match_found = True
+                            break
+                        else:
+                            shape_mismatch_keys.append(cand)
+                            logger.warning(
+                                f"Shape mismatch for {cand} (from {k}): checkpoint {v.shape} vs model {model_state_dict[cand].shape}"
+                            )
+                if not match_found and "audio_encoder" in k:
+                    pass
+            model.load_state_dict(pretrained_dict, strict=False)
+            print(f"Checkpoint loaded (partial). Shape mismatches ignored: {len(shape_mismatch_keys)}")
+            if shape_mismatch_keys:
+                print(f"First 5 mismatched keys: {shape_mismatch_keys[:5]}")
+            if any("speech_proj" in k for k in pretrained_dict.keys()):
+                print("Confirmed: speech_proj weights loaded from checkpoint.")
+            else:
+                print("WARNING: speech_proj weights NOT loaded from checkpoint!")
+            if any("audio_encoder" in k for k in pretrained_dict.keys()):
+                print("Confirmed: audio_encoder weights loaded from checkpoint.")
+            else:
+                print("WARNING: audio_encoder weights NOT loaded from checkpoint!")
 
     # Move to device
     model.to(device)
@@ -188,7 +327,54 @@ def evaluate_batch(model, batch, device, real_token_id, fake_token_id, amp_dtype
         'logits_fake': logits_fake.float().cpu()
     }
 
+
+@torch.inference_mode()
+def run_one_generate_and_log(model, batch, device, amp_dtype=None, num_samples=8):
+    """Run generate once on the first num_samples and log raw output to verify no hallucination."""
+    n = min(num_samples, batch["raw_wav"].shape[0])
+    raw_wav = batch["raw_wav"][:n].to(device, non_blocking=True)
+    audio_attention_mask = batch.get("audio_attention_mask")
+    if audio_attention_mask is not None:
+        audio_attention_mask = audio_attention_mask[:n].to(device, non_blocking=True)
+    prompts = list(batch["prompt"][:n])
+    samples = {
+        "raw_wav": raw_wav,
+        "audio_attention_mask": audio_attention_mask,
+        "prompt": prompts
+    }
+    if amp_dtype == 'fp16':
+        autocast_ctx = torch.amp.autocast('cuda', dtype=torch.float16)
+    elif amp_dtype == 'bf16':
+        autocast_ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16)
+    else:
+        autocast_ctx = nullcontext()
+    with autocast_ctx:
+        out = model.generate(
+            samples,
+            generate_cfg={"max_new_tokens": 20, "do_sample": False},
+            prompts=prompts
+        )
+    for i, raw_text in enumerate(out):
+        text = raw_text.strip() if raw_text else ""
+        logger.info(
+            "[sanity generate] sample %d: raw model output = %r (check Real/Fake, not hallucination)",
+            i + 1, text
+        )
+
+
 def main(args):
+    # Determine output paths (same logic as at save time)
+    if args.output_csv:
+        output_csv_path = args.output_csv
+    else:
+        input_name = os.path.splitext(os.path.basename(args.input_jsonl))[0]
+        output_csv_path = os.path.join(args.checkpoint_dir, f"NEW{input_name}_{args.epoch}_42.csv")
+    metrics_path = os.path.splitext(output_csv_path)[0] + f"NEW_metrics_{args.epoch}_42.json"
+
+    if os.path.isfile(output_csv_path) and os.path.isfile(metrics_path):
+        print(f"Outputs already exist, skipping evaluation: {output_csv_path}, {metrics_path}")
+        return
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Enable TF32 for better performance on Ampere GPUs
@@ -237,9 +423,13 @@ def main(args):
     
     print(f"Starting evaluation on {total_samples} samples...")
     print(f"Batch size: {args.batch_size}, Workers: {args.num_workers}")
-    
+    sanity_generate_done = False
+
     # Main evaluation loop
     for batch in tqdm(dataloader, disable=args.disable_tqdm):
+        if args.log_one_generate and not sanity_generate_done:
+            run_one_generate_and_log(model, batch, device, amp_dtype)
+            sanity_generate_done = True
         batch_results = evaluate_batch(
             model, batch, device, token_real, token_fake, amp_dtype
         )
@@ -302,29 +492,6 @@ def main(args):
     recall = tp_fake / (tp_fake + fn_fake) if (tp_fake + fn_fake) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
     
-    # # EER calculation
-    # fpr_list = []
-    # fnr_list = []
-    # thresholds = np.linspace(0, 1, 1000)
-    
-    # for thresh in thresholds:
-    #     predictions = (y_scores_real >= thresh).astype(int)
-    #     fp = np.sum((y_true == 0) & (predictions == 1))
-    #     fn = np.sum((y_true == 1) & (predictions == 0))
-    #     tn = np.sum((y_true == 0) & (predictions == 0))
-    #     tp = np.sum((y_true == 1) & (predictions == 1))
-        
-    #     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-    #     fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
-        
-    #     fpr_list.append(fpr)
-    #     fnr_list.append(fnr)
-    
-    # fpr_arr = np.array(fpr_list)
-    # fnr_arr = np.array(fnr_list)
-    # eer_idx = np.argmin(np.abs(fpr_arr - fnr_arr))
-    # eer = (fpr_arr[eer_idx] + fnr_arr[eer_idx]) / 2
-    
     fpr, fnr, thresholds = det_curve(y_true, y_scores_real)
     index = np.nanargmin(np.absolute(fnr - fpr))
     eer = fpr[index] + fnr[index]
@@ -354,18 +521,10 @@ def main(args):
             print(f"{k}: {v}")
     print("="*30)
     
-    # Save results
-    if args.output_csv:
-        output_csv_path = args.output_csv
-    else:
-        input_name = os.path.splitext(os.path.basename(args.input_jsonl))[0]
-        output_csv_path = os.path.join(args.checkpoint_dir, f"{input_name}_{args.epoch}_42.csv")
-    
+    # Save results (output_csv_path and metrics_path set at start of main)
     df = pd.DataFrame(results)
     df.to_csv(output_csv_path, index=False)
     print(f"Results saved to {output_csv_path}")
-    
-    metrics_path = os.path.splitext(output_csv_path)[0] + f"_metrics_{args.epoch}_42.json"
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=4)
     print(f"Metrics saved to {metrics_path}")
@@ -381,7 +540,8 @@ if __name__ == "__main__":
     parser.add_argument("--mixed_precision", type=str, default=None, choices=[None, 'fp16', 'bf16'], help="Use AMP (recommended: bf16)")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile for speedup")
     parser.add_argument("--disable_tqdm", action="store_true")
+    parser.add_argument("--no_log_one_generate", action="store_true", help="Disable one-call generate sanity check (no raw output logged).")
     parser.add_argument("--prompt", type=str, default="Listen to this audio clip: <Speech><SpeechHere></Speech>. Is this audio real or fake?")
-    
     args = parser.parse_args()
+    args.log_one_generate = not args.no_log_one_generate
     main(args)
