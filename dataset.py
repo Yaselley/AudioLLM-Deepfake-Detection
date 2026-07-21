@@ -9,6 +9,11 @@ import librosa
 import random
 import pandas as pd
 
+import warnings
+# Ignore the specific dependency warning
+warnings.filterwarnings("ignore", category=FutureWarning, module="librosa.core.audio")
+warnings.filterwarnings("ignore", category=UserWarning)
+
 class AudioDeepfakeDataset(Dataset):
     def __init__(self, json_path, prompt_path=None, sample_rate=16000):
         super().__init__()
@@ -38,6 +43,8 @@ class AudioDeepfakeDataset(Dataset):
                 logging.error(f"Error loading prompts from {prompt_path}: {e}")
         
         self.sample_rate = sample_rate
+        self.max_audio_sec = 10
+        self.max_audio_len = int(self.sample_rate * self.max_audio_sec)
         
     def __len__(self):
         return len(self.data)
@@ -52,7 +59,11 @@ class AudioDeepfakeDataset(Dataset):
         except Exception as e:
             logging.error(f"Error reading {audio_path}: {e}")
             audio = np.zeros(self.sample_rate) # 1 sec silence
-            
+
+        # Hard cap: keep at most 10 seconds of audio
+        if audio.shape[0] > self.max_audio_len:
+            audio = audio[: self.max_audio_len]
+
         # Convert to Tensor
         raw_wav = torch.from_numpy(audio).float()
 

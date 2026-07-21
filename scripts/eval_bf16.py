@@ -38,11 +38,15 @@ set_seed(42)
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models_clean.audiollm_base_opensmile import AudioDeepfakeLLM
+from models.audiollm_base_opensmile import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
 
-from huggingface_hub import login
-login(token="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")
+
+def maybe_hf_login() -> None:
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        from huggingface_hub import login
+        login(token=token)
 
 
 def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False, amp_dtype='fp16'):
@@ -363,6 +367,7 @@ def run_one_generate_and_log(model, batch, device, amp_dtype=None, num_samples=8
 
 
 def main(args):
+    maybe_hf_login()
     # Determine output paths (same logic as at save time)
     if args.output_csv:
         output_csv_path = args.output_csv
