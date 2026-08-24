@@ -100,12 +100,15 @@ def main(
     maybe_hf_login(hf_token)
     config = load_config(config_path)
     config["model"]["lora"] = True
-    if output_dir:
+    if output_dir is not None:
+        output_dir = str(Path(output_dir).expanduser().resolve())
         config["output_dir"] = output_dir
     output_dir = config.get("output_dir", "./output")
+    output_dir = str(Path(output_dir).expanduser().resolve())
 
     setup_logging(output_dir, log_name="train_stage2.log")
     save_config(config, output_dir)
+    logging.info("Output directory: %s", output_dir)
     logging.info("Pretrained checkpoint: %s", pretrained_checkpoint)
 
     set_seed(config["train"].get("seed", 42))

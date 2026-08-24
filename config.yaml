@@ -2,12 +2,13 @@ model:
   # LLM Settings
   # llm_path: "meta-llama/Llama-3.1-8B-Instruct" 
   # llm_type: "llama" # "qwen2", "qwen3", "llama"
-  llm_path: "Qwen/Qwen3-14B" 
-  llm_type: "qwen3" # "qwen2", "qwen3", "llama"
+  llm_path: "/netscratch/fkallel/models/Qwen3.5-0.8B/" 
+  llm_type: "qwen3.5" # "qwen2", "qwen3", "llama"
 
   # Audio Encoder Settings
-  audio_encoder_path: "openai/whisper-large-v3-turbo"
-  audio_encoder_type: "whisper" 
+  audio_encoder_path: "/ds-slt/audio_weights/xlsr2_300m.pt"
+  audio_encoder_type: "wav2vec2" 
+  audio_encoder_source: "fairseq" 
 
   # audio_encoder_path: "facebook/w2v-bert-2.0"
   # audio_encoder_type: "wav2vec2-bert"
@@ -35,12 +36,12 @@ model:
   special_tokens: [] # e.g. ["<SpeechHere>"] if not already handled by logic
 
 data:
-  train_path: "data/asv19_train.jsonl"
-  val_path: "data/asv19_val.jsonl"
+  train_path: "data/my_hir_sdd_binary_train_unique_2.json"
+  val_path: "data/my_hir_sdd_binary_val_unique_2.json"
   prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 2
+  batch_size: 8
   epochs: 5
   lr: 1e-4          # Global fallback LR
   lr_adapter: 1e-5  
@@ -48,6 +49,6 @@ train:
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
   seed: 42
-  grad_accum_steps: 4
+  grad_accum_steps: 1
 
 output_dir: "output_v6"

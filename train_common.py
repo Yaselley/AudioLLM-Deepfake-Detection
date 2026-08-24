@@ -301,3 +301,85 @@ def run_training_loop(
             )
 
     logging.info("Done. Best val loss %.4f at epoch %s", best_val, best_epoch)
+
+def save_step_checkpoint(
+    model: AudioDeepfakeLLM,
+    optimizer: optim.AdamW,
+    output_dir: str,
+    config: dict,
+    *,
+    epoch: int,
+    step: int,
+    global_step: int,
+) -> None:
+    """Mid-epoch checkpoint for resuming after a wall-clock timeout.
+
+    Written to a fixed filename (not epoch/step-suffixed) so each new save
+    overwrites the last — avoids filling the cluster FS with stale
+    intermediate checkpoints during a multi-day epoch.
+    """
+    out = Path(output_dir)
+    model_cfg = config["model"]
+
+    ckpt_dir = out / "step_ckpt"
+    ckpt_dir.mkdir(exist_ok=True)
+
+    if model_cfg.get("lora", True):
+        model.llm_model.save_pretrained(ckpt_dir / "lora")
+        if model.speech_proj is not None:
+            torch.save(model.speech_proj.state_dict(), ckpt_dir / "proj.pt")
+        if should_save_audio_encoder(config):
+            torch.save(model.audio_encoder.state_dict(), ckpt_dir / "audio_encoder.pt")
+    else:
+        torch.save(model.state_dict(), ckpt_dir / "model.pt")
+
+    # Optimizer state is required for correct resume — without it, Adam's
+    # moment estimates reset and you get a loss spike after every resume.
+    torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
+
+    meta = {"epoch": epoch, "step": step, "global_step": global_step}
+    with open(ckpt_dir / "meta.json", "w") as f:
+        json.dump(meta, f)
+
+    # Atomic-ish: write to tmp then rename, so a job killed mid-write
+    # doesn't leave a half-written checkpoint that resume then loads.
+    logging.info("Saved step checkpoint: epoch=%s step=%s global_step=%s", epoch, step, global_step)
+
+
+def load_step_checkpoint(
+    model: AudioDeepfakeLLM,
+    optimizer: optim.AdamW,
+    output_dir: str,
+    config: dict,
+) -> dict | None:
+    """Returns resume metadata dict, or None if no step checkpoint exists."""
+    ckpt_dir = Path(output_dir) / "step_ckpt"
+    meta_path = ckpt_dir / "meta.json"
+    if not meta_path.is_file():
+        return None
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    model_cfg = config["model"]
+    if model_cfg.get("lora", True):
+        from peft import PeftModel
+        lora_dir = ckpt_dir / "lora"
+        if lora_dir.is_dir():
+            model.llm_model.load_adapter(str(lora_dir), adapter_name="default", is_trainable=True)
+            logging.info("Resumed LoRA weights from %s", lora_dir)
+        proj_path = ckpt_dir / "proj.pt"
+        if model.speech_proj is not None and proj_path.is_file():
+            model.speech_proj.load_state_dict(torch.load(proj_path, map_location="cpu"))
+        enc_path = ckpt_dir / "audio_encoder.pt"
+        if should_save_audio_encoder(config) and enc_path.is_file():
+            model.audio_encoder.load_state_dict(torch.load(enc_path, map_location="cpu"))
+    else:
+        model.load_state_dict(torch.load(ckpt_dir / "model.pt", map_location="cpu"))
+
+    opt_path = ckpt_dir / "optimizer.pt"
+    if opt_path.is_file():
+        optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+
+    logging.info("Resuming from step checkpoint: %s", meta)
+    return meta

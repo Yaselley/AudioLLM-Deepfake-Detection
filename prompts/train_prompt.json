@@ -1,5 +1,9 @@
 {
     "deepfake_detection": [
         "Listen to this audio clip: <Speech><SpeechHere></Speech>. Is this audio real or fake?"
+    ],
+
+    "deepfake_detection_with_reasoning": [
+        "Listen to this audio clip: <Speech><SpeechHere></Speech>. You are an expert audio forensics analyst specializing in detecting synthetic speech. Assess whether the audio sample contains genuine human speech or synthesized artificial speech.\n\nStructure your response as follows:\n\n1. Inside <observations></observations>, list each distinct acoustic cue you notice as a numbered list, one cue per line, in this exact format:\n<observations>\n1. First observation.\n2. Second observation.\n</observations>\nIf the audio is real, 1-2 observations are usually enough.\n\n2. Add one or two <reasoning_step></reasoning_step> tags linking the Observations to the verdict. Each reasoning_step must be a single short sentence stating the cue-to-verdict link directy.\n\n3. Add exactly one <conclusion></conclusion> tag: a single short sentence stating the verdict.\n\nOutput only:\n<reasoning><observations>...</observations><reasoning_step>...</reasoning_step>...<conclusion>...</conclusion></reasoning>\n<answer>Real/Fake</answer>"
     ]
 }

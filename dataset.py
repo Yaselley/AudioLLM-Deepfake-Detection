@@ -18,17 +18,17 @@ class AudioDeepfakeDataset(Dataset):
     def __init__(self, json_path, prompt_path=None, sample_rate=16000):
         super().__init__()
         
-        # Load data from JSON/JSONL
+        # Load data from JSON/JSONL or a list of JSON/JSONL paths
         self.data = []
-        with open(json_path, 'r') as f:
-            lines = f.readlines()
-            for line in lines:
-                try:
-                    line = line.strip()
-                    self.data.append(json.loads(line))
-                except json.JSONDecodeError:
-                    logging.error(f"Skipping invalid JSON line in {json_path}")
-                
+        paths = json_path if isinstance(json_path, list) else [json_path]
+        for path in paths:
+            with open(path, 'r') as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    self.data.extend(loaded)
+                else:
+                    self.data.append(loaded)
+            
         # Load Prompts
         self.prompts = [
             "User: <SpeechHere> Is this audio real or fake? Answer: "
@@ -37,8 +37,8 @@ class AudioDeepfakeDataset(Dataset):
             try:
                 with open(prompt_path, 'r') as f:
                     prompt_data = json.load(f)
-                    if "deepfake_detection" in prompt_data:
-                        self.prompts = prompt_data["deepfake_detection"]
+                    if "deepfake_detection_with_reasoning" in prompt_data:
+                        self.prompts = prompt_data["deepfake_detection_with_reasoning"]
             except Exception as e:
                 logging.error(f"Error loading prompts from {prompt_path}: {e}")
         
@@ -52,7 +52,7 @@ class AudioDeepfakeDataset(Dataset):
     def __getitem__(self, index):
         item = self.data[index]
         audio_path = item["path"]
-        label_str = item.get("label", "real") # "real" or "fake"
+        label_str = item.get("text", "Real") # "real" or "fake"
         # Load Audio
         try:
             audio, _ = librosa.load(audio_path, sr=self.sample_rate)
@@ -68,7 +68,7 @@ class AudioDeepfakeDataset(Dataset):
         raw_wav = torch.from_numpy(audio).float()
 
         # Text Label
-        text_target = "Real" if label_str.lower() == "real" else "Fake"
+        text_target = label_str
 
         # Select Random Prompt
         prompt = random.choice(self.prompts)

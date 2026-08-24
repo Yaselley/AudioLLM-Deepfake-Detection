@@ -15,8 +15,8 @@ train:
   seed: 2
   grad_accum_steps: 1
 model:
-  llm_path: Qwen/Qwen2.5-0.5B-Instruct
-  llm_type: qwen2
+  llm_path: Qwen/Qwen3.5-0.8B
+  llm_type: qwen3.5
   lora: false
   lora_rank: 64
   lora_alpha: 16

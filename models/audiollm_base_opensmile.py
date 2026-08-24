@@ -26,13 +26,13 @@ if not hasattr(typing, 'Self'):
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-sys.path.append("/netscratch/yelkheir/DeepFense/AudioLLM-Deepfake-Detection/models")
+sys.path.append("/netscratch/fkallel/AudioLLM-Deepfake-Detection/models")
 
 # Import separated speech encoders
 from speech_encoders import create_speech_encoder, BaseSpeechEncoder
 
 # Add DeepFense path for custom modules if needed
-sys.path.append("/netscratch/yelkheir/DeepFense/DeepFense")
+sys.path.append("/netscratch/fkallel/deepfense-framework")
 
 
 class AudioDeepfakeLLM(nn.Module):
@@ -1043,7 +1043,8 @@ class AudioDeepfakeLLM(nn.Module):
         
         return last_token_logits
 
-    def generate(self, samples, generate_cfg={}, prompts=None):
+
+    def generate(self, samples, generate_cfg={}, prompts=None, return_outputs=False):
         """
         Generate text from audio.
         
@@ -1117,4 +1118,237 @@ class AudioDeepfakeLLM(nn.Module):
         )
         
         text = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        if return_outputs:
+            # Need to compute logits via forward pass
+            # Reconstruct the input embeddings
+            with torch.no_grad():
+                # outputs contains only the generated tokens (prompt was given as embeddings)
+                # So completion_ids is just outputs itself
+                completion_ids = outputs
+                
+                # Get embeddings for completions
+                if self.lora:
+                    completion_embeds = self.llm_model.model.model.embed_tokens(completion_ids.long())
+                else:
+                    completion_embeds = self.llm_model.model.embed_tokens(completion_ids.long())
+                
+                # Concatenate: [bos, audio, completion]
+                full_embeds = torch.cat([inputs_embeds, completion_embeds], dim=1)
+                full_atts = torch.cat([attention_mask, torch.ones_like(completion_ids)], dim=1)
+                
+            # Forward pass to get logits
+            llm_outputs = self.llm_model(
+                inputs_embeds=full_embeds,
+                attention_mask=full_atts,
+                return_dict=True
+            )
+            
+            # Extract logits for completion tokens only
+            # For causal LM, logit at position i predicts token at position i+1
+            # We have: [bos, audio, completion_tokens]
+            # To predict completion_tokens, we need logits from positions [prompt_len-1 : prompt_len+completion_len-1]
+            prompt_length = inputs_embeds.size(1)  # bos + audio
+            completion_length = completion_ids.size(1)
+            logits = llm_outputs.logits[:, prompt_length-1:prompt_length-1+completion_length, :]
+            
+            return text, completion_ids, logits
+
         return text
+
+    def compute_logits_for_completions(self, samples, completion_ids):
+        raw_wav = samples["raw_wav"]
+        audio_attention_mask = samples.get("audio_attention_mask", None)
+
+        prompts = samples.get("prompt")
+        if prompts is None:
+            raise ValueError("Prompt must be provided")
+
+        # OpenSMILE
+        prompt_list = prompts if isinstance(prompts, list) else [prompts]
+        has_opensmile_token = any(
+            "<OPENSMILE>" in str(p) for p in prompt_list
+        )
+
+        opensmile_texts = None
+        if has_opensmile_token or self.use_opensmile:
+            if self.opensmile_extractor is None:
+                from speech_encoders.opensmile_features import OpenSMILETextExtractor
+                self.opensmile_extractor = OpenSMILETextExtractor()
+
+            opensmile_texts = self.extract_opensmile_text(
+                raw_wav,
+                audio_attention_mask
+            )
+
+        # Encode audio
+        speech_output, speech_lens = self.encode_speech(
+            raw_wav,
+            audio_attention_mask
+        )
+
+        # Construct exactly the same prompt representation used elsewhere
+        inputs_embeds, attention_mask = self.prompt_wrap(
+            speech_output,
+            speech_lens,
+            prompts,
+            multi_prompt=isinstance(prompts, list),
+            padding_side="right",
+            opensmile_texts=opensmile_texts,
+        )
+
+        device = inputs_embeds.device
+        batch_size = inputs_embeds.shape[0]
+
+        # BOS
+        bos_token_id = (
+            self.tokenizer.bos_token_id
+            if self.tokenizer.bos_token_id is not None
+            else self.tokenizer.eos_token_id
+        )
+
+        bos = torch.full(
+            (batch_size, 1),
+            bos_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+
+        bos_embeds = self._get_text_embeds(bos)
+
+        # Completion embeddings
+        completion_embeds = self._get_text_embeds(
+            completion_ids.long()
+        )
+
+        # IMPORTANT:
+        # prompt_wrap() may contain right padding.
+        # Remove padding per sample before concatenating completion.
+        full_embeds_list = []
+        full_attention_list = []
+
+        for i in range(batch_size):
+            valid_len = attention_mask[i].sum().long().item()
+
+            real_prompt_embeds = inputs_embeds[
+                i:i+1, :valid_len
+            ]
+
+            real_prompt_mask = attention_mask[
+                i:i+1, :valid_len
+            ]
+
+            curr_completion = completion_embeds[i:i+1]
+
+            full_embeds = torch.cat(
+                [
+                    bos_embeds[i:i+1],
+                    real_prompt_embeds,
+                    curr_completion,
+                ],
+                dim=1,
+            )
+
+            full_attention = torch.cat(
+                [
+                    torch.ones(
+                        (1, 1),
+                        dtype=real_prompt_mask.dtype,
+                        device=device,
+                    ),
+                    real_prompt_mask,
+                    torch.ones_like(completion_ids[i:i+1]),
+                ],
+                dim=1,
+            )
+
+            full_embeds_list.append(full_embeds)
+            full_attention_list.append(full_attention)
+
+        max_len = max(
+            x.shape[1]
+            for x in full_embeds_list
+        )
+
+        padded_embeds = []
+        padded_attention = []
+
+        for emb, attn in zip(
+            full_embeds_list,
+            full_attention_list
+        ):
+            pad_len = max_len - emb.shape[1]
+
+            if pad_len > 0:
+                emb = torch.cat(
+                    [
+                        emb,
+                        torch.zeros(
+                            1,
+                            pad_len,
+                            emb.shape[-1],
+                            dtype=emb.dtype,
+                            device=device,
+                        ),
+                    ],
+                    dim=1,
+                )
+
+                attn = torch.cat(
+                    [
+                        attn,
+                        torch.zeros(
+                            1,
+                            pad_len,
+                            dtype=attn.dtype,
+                            device=device,
+                        ),
+                    ],
+                    dim=1,
+                )
+
+            padded_embeds.append(emb)
+            padded_attention.append(attn)
+
+        full_embeds = torch.cat(
+            padded_embeds,
+            dim=0,
+        )
+
+        full_attention = torch.cat(
+            padded_attention,
+            dim=0,
+        )
+
+        # Forward with gradients
+        outputs = self.llm_model(
+            inputs_embeds=full_embeds,
+            attention_mask=full_attention,
+            return_dict=True,
+        )
+
+        # The completion starts after:
+        #
+        # BOS + prompt
+        #
+        # For each sample, the relevant logits are the positions
+        # immediately preceding each completion token.
+        logits_list = []
+
+        for i in range(batch_size):
+            prompt_len = (
+                1 +
+                attention_mask[i].sum().long().item()
+            )
+
+            completion_len = completion_ids.shape[1]
+
+            curr_logits = outputs.logits[
+                i:i+1,
+                prompt_len - 1:
+                prompt_len - 1 + completion_len,
+                :,
+            ]
+
+            logits_list.append(curr_logits)
+
+        return torch.cat(logits_list, dim=0)
