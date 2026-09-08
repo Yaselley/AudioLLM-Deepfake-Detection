@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -137,25 +138,33 @@ def _load_checkpoint_weights(model, checkpoint_dir: str, epoch: str, device: tor
     model.to(device)
     model.eval()
 
-
-def _extract_label(text: str) -> int:
+import re 
+def extract_tag(text, tag):
     if text is None:
-        return 0
-    text_lower = str(text).lower().strip()
-    if "<answer>bonafide</answer>" in text_lower or "<answer>real</answer>" in text_lower:
-        return 1
-    if "<answer>spoof</answer>" in text_lower or "<answer>fake</answer>" in text_lower:
-        return 0
-    if "<conclusion>bonafide</conclusion>" in text_lower or "<conclusion>real</conclusion>" in text_lower:
-        return 1
-    if "<conclusion>spoof</conclusion>" in text_lower or "<conclusion>fake</conclusion>" in text_lower:
-        return 0
-    if "bonafide" in text_lower or "real" in text_lower:
-        return 1
-    if "spoof" in text_lower or "fake" in text_lower:
-        return 0
-    return 0
+        return ""
+    m = re.search(
+        rf"<{tag}>(.*?)</{tag}>",
+        str(text),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return m.group(1).strip() if m else ""
 
+
+def _extract_label(text):
+    if text is None:
+        return None
+    answer = extract_tag(text, "answer").strip().lower()
+    if not answer:
+        answer = extract_tag(text, "conclusion").strip().lower()
+    if not answer:
+        answer = str(text).strip().lower()
+    if "bonafide" in answer or "real" in answer or "authentic" in answer or "genuine" in answer:
+        return 1
+
+    if "spoof" in answer or "fake" in answer or "synthetic" in answer or "artificial" in answer or "generated" in answer or "not genuine" in answer:
+        return 0
+
+    return 0
 
 def _compute_classification_metrics(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
     total_samples = tp + tn + fp + fn
@@ -224,17 +233,17 @@ def _recompute_counts(results: list[dict[str, Any]]) -> tuple[int, int, int, int
 
 def _load_resume_state(
     output_dir: str, split: str, epoch: str, id_key: str
-) -> tuple[set[str], list[dict[str, Any]], bool]:
-    """Return (completed_ids, completed_results, is_fully_merged) from a prior run."""
+) -> tuple[Counter[str], list[dict[str, Any]]]:
+    """Return per-ID completed counts and prior results from a previous run."""
     final_file = os.path.join(output_dir, f"eval_{split}_epoch_{epoch}.json")
     incremental_file = os.path.join(output_dir, f"eval_{split}_epoch_{epoch}_incremental.jsonl")
 
     if os.path.exists(final_file):
         with open(final_file, "r", encoding="utf-8") as f:
             results = json.load(f)
-        completed_ids = {str(item.get("id")) for item in results}
+        completed_ids = Counter(str(item.get("id")) for item in results)
         logging.info("Found completed final results at %s (%d samples).", final_file, len(results))
-        return completed_ids, results, True
+        return completed_ids, results
 
     if os.path.exists(incremental_file):
         results = []
@@ -242,19 +251,19 @@ def _load_resume_state(
             for line in f:
                 if line.strip():
                     results.append(json.loads(line))
-        completed_ids = {str(item.get("id")) for item in results}
+        completed_ids = Counter(str(item.get("id")) for item in results)
         logging.info(
             "Found partial incremental results at %s (%d samples already done). Resuming.",
             incremental_file,
             len(results),
         )
-        return completed_ids, results, False
+        return completed_ids, results
 
-    return set(), [], False
+    return Counter(), []
 
 
 def _filter_remaining_data(
-    data_path: str, completed_ids: set[str], id_key: str, output_dir: str, split: str
+    data_path: str, completed_ids: Counter[str], id_key: str, output_dir: str, split: str
 ) -> str:
     """Write a filtered copy of the dataset JSON excluding already-completed ids."""
     with open(data_path, "r", encoding="utf-8") as f:
@@ -263,7 +272,14 @@ def _filter_remaining_data(
     if not isinstance(all_items, list):
         raise ValueError(f"Expected a JSON array in {data_path}, got {type(all_items)}")
 
-    remaining = [item for item in all_items if str(item.get(id_key)) not in completed_ids]
+    remaining = []
+    remaining_completed = completed_ids.copy()
+    for item in all_items:
+        item_id = str(item.get(id_key))
+        if remaining_completed[item_id] > 0:
+            remaining_completed[item_id] -= 1
+        else:
+            remaining.append(item)
 
     logging.info(
         "Resume filter: %d total, %d already done, %d remaining.",
@@ -381,27 +397,14 @@ def main() -> None:
     setup_logging(output_dir, log_name="test.log")
     save_config(config, output_dir)
 
-    completed_ids: set[str] = set()
+    completed_ids: Counter[str] = Counter()
     prior_results: list[dict[str, Any]] = []
     effective_data_path = args.data_path
 
     if args.resume:
-        completed_ids, prior_results, is_complete = _load_resume_state(
+        completed_ids, prior_results = _load_resume_state(
             output_dir, args.split, args.epoch, args.id_key
         )
-        if is_complete:
-            metrics = _compute_classification_metrics(*_recompute_counts(prior_results))
-            metrics["total_samples"] = len(prior_results)
-            logging.info(
-                "Evaluation for split=%s epoch=%s is already fully complete (%d samples). "
-                "Skipping model load and generation. Metrics: %s",
-                args.split,
-                args.epoch,
-                len(prior_results),
-                json.dumps(metrics, indent=2),
-            )
-            return
-
         if completed_ids:
             data_cfg = config["data"]
             base_data_path = args.data_path or data_cfg.get(f"{args.split}_path")
@@ -410,6 +413,16 @@ def main() -> None:
             effective_data_path = _filter_remaining_data(
                 base_data_path, completed_ids, args.id_key, output_dir, args.split
             )
+
+            remaining_count = len(json.loads(Path(effective_data_path).read_text()))
+            if remaining_count == 0:
+                metrics = _compute_classification_metrics(*_recompute_counts(prior_results))
+                metrics["total_samples"] = len(prior_results)
+                metrics_path = os.path.join(output_dir, f"eval_{args.split}_epoch_{args.epoch}_metrics.json")
+                with open(metrics_path, "w", encoding="utf-8") as f:
+                    json.dump(metrics, f, indent=2)
+                logging.info("Evaluation is complete; recomputed metrics saved to %s: %s", metrics_path, json.dumps(metrics))
+                return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info("Device: %s", device)
@@ -437,6 +450,10 @@ def main() -> None:
         save_freq=args.save_freq,
         prior_results=prior_results,
     )
+    metrics_path = os.path.join(output_dir, f"eval_{args.split}_epoch_{args.epoch}_metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    logging.info("Metrics saved to %s", metrics_path)
     logging.info("Evaluation metrics: %s", json.dumps(metrics, indent=2))
 
 

@@ -6,7 +6,7 @@ REWARD_WEIGHTS = {
     "label_correct": 1.0,
     "label_incorrect": 0.0,  
     "format": 0.1,
-    "reasoning": 0.0,  
+    "reasoning": 0.1,  
 }
 
 
@@ -37,10 +37,11 @@ def extract_label(text):
         answer = extract_tag(text, "conclusion").strip().lower()
     if not answer:
         answer = str(text).strip().lower()
-    if "bonafide" in answer or "real" in answer:
-        return "Real"
-    if "spoof" in answer or "fake" in answer:
+    if "spoof" in answer or "fake" in answer or "synthetic" in answer or "artificial" in answer or "generated" in answer or "not genuine" in answer:
         return "Fake"
+
+    if "bonafide" in answer or "real" in answer or "authentic" in answer or "genuine" in answer:
+        return "Real"
     return None
 
 
@@ -126,12 +127,14 @@ def format_reward(prediction) -> float:
         has_concl = bool(extract_tag(text, "conclusion").strip())
         has_answer = bool(extract_tag(text, "answer").strip())
 
-        if not has_answer:
+        has_terminal = has_concl or has_answer
+ 
+        if not has_terminal:
             return 0.0
         score = 0.33
         if has_step or has_obs:
             score = 0.66
-        if has_answer and has_concl and (has_step or has_obs):
+        if has_terminal and (has_step or has_obs):
             score = 1.0
         return score
 
@@ -157,5 +160,6 @@ def compute_reward(prediction_text, ground_truth_text) -> float:
         reward += REWARD_WEIGHTS["label_incorrect"]
 
     reward += REWARD_WEIGHTS["format"] * format_reward(prediction_text)
-
+    # logging.info("[GRPO] compute_reward: prediction_text=%s, ground_truth_text=%s, pred_label=%s, gt_label=%s, label_correct=%s, reasoning_reward=%.4f, format_reward=%.4f, total_reward=%.4f",
+    #              prediction_text, ground_truth_text, pred_label, gt_label, label_correct, reasoning_reward(prediction_text, ground_truth_text), format_reward(prediction_text), reward)
     return float(reward)

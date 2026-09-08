@@ -25,7 +25,7 @@ data:
   train_path: "data/my_hir_sdd_binary_train_unique_2.json"
   val_path: "data/my_hir_sdd_binary_val_unique_2.json"
   test_path: "data/my_hir_sdd_binary_test_unique_2.json"
-  prompt_path: "prompts/train_prompt.json"
+  # prompt_path: "prompts/train_prompt.json"
 
 train:
   batch_size: 4
@@ -36,6 +36,6 @@ train:
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
   seed: 240
-  grad_accum_steps: 1
+  grad_accum_steps: 4
 
 output_dir: "output_v6/qwen3.5_4B_lora_240_myhir_asvspoof19"

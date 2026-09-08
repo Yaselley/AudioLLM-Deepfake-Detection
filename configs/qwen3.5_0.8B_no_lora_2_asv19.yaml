@@ -25,7 +25,7 @@ data:
   train_path: "data/asvspoof19_train.json"
   val_path: "data/asvspoof19_dev.json"
   test_path: "data/asvspoof19_eval.json"
-  prompt_path: "prompts/train_prompt.json"
+  prompt_path: "prompts/qwen_prompt.json"
 
 train:
   batch_size: 8

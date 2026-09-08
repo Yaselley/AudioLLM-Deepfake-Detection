@@ -21,11 +21,12 @@ model:
   # Special Tokens (optional)
   special_tokens: []
 
+
 data:
-  train_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_train_2_structured_explanation.json"
-  val_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_val_2_structured_explanation.json"
-  test_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_test_2_structured_explanation.json"
-  prompt_path: "prompts/train_prompt.json"
+  train_path: "data/hir_sdd_explanation_train_clean.json"
+  val_path: "data/hir_sdd_explanation_val_clean.json"
+  test_path: "data/hir_sdd_explanation_test_clean.json"
+  prompt_path: "prompts/train_prompt_explanation.json"
 
 train:
   batch_size: 4
@@ -36,6 +37,6 @@ train:
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
   seed: 240
-  grad_accum_steps: 1
+  grad_accum_steps: 2
 
-output_dir: "output_v24/qwen3.5_0.8B_lora_240_myhir_after_asvspoof19"
+output_dir: "output_v26/qwen3.5_0.8B_lora_240_myhir_explanation"

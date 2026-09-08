@@ -31,7 +31,7 @@ class AudioDeepfakeDataset(Dataset):
             
         # Load Prompts
         self.prompts = [
-            "User: <SpeechHere> Is this audio real or fake? Answer: "
+            "Listen to this audio clip: <Speech><SpeechHere></Speech>. Is this audio real or fake?"
         ]
         if prompt_path:
             try:

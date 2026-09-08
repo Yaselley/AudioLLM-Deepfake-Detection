@@ -21,21 +21,22 @@ model:
   # Special Tokens (optional)
   special_tokens: []
 
+
 data:
-  train_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_train_2_structured.json"
-  val_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_val_2_structured.json"
-  test_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_test_2_structured.json"
+  train_path: "data/hir_sdd_reasoning_train_clean.json"
+  val_path: "data/hir_sdd_reasoning_val_clean.json"
+  test_path: "data/hir_sdd_reasoning_test_clean.json"
   prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 8
+  batch_size: 4
   epochs: 3
   lr: 1e-5          # Global fallback LR
-  lr_adapter: 1e-5
+  lr_adapter: 1e-5  
   lr_audio: 1e-6    # Lower LR for full fine-tuning of Whisper
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
-  seed: 240
-  grad_accum_steps: 1
+  seed: 2
+  grad_accum_steps: 2
 
-output_dir: "output_v23/qwen3.5_0.8B_lora_240_myhir_after_asvspoof19"
+output_dir: "output_v25/qwen3.5_0.8B_lora_240_myhir_reasoning"

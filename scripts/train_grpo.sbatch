@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=audillm_train
-#SBATCH --partition=B200
-#SBATCH --gres=gpu:1
+#SBATCH --partition=H100,H100-PCI,H100-SLT,H200,H200-PCI,B200
+#SBATCH --gres=gpu:8
 #SBATCH --mem=100G
 #SBATCH --cpus-per-task=1
 #SBATCH --time=24:00:00
@@ -22,4 +22,6 @@ CHECKPOINT=${2}
 echo "Running with config: ${CONFIG}"
 
 pip install -r requirements.txt
-python3 train_grpo.py --config "${CONFIG}" --pretrained_checkpoint "${CHECKPOINT}" 
+NUM_GPUS=${NUM_GPUS:-${SLURM_GPUS_ON_NODE:-4}}
+torchrun --standalone --nproc_per_node="${NUM_GPUS}" train_grpo.py \
+	--config "${CONFIG}" --pretrained_checkpoint "${CHECKPOINT}"

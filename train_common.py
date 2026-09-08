@@ -15,9 +15,44 @@ import torch.optim as optim
 import yaml
 from huggingface_hub import login
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from dataset import AudioDeepfakeDataset
 from models.audiollm_base_opensmile import AudioDeepfakeLLM
+
+
+def init_distributed() -> tuple[torch.device, bool]:
+    """Initialize torchrun's process group and return (device, is_main)."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size == 1:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu"), True
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Multi-process training requires CUDA on every process")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    torch.distributed.init_process_group(backend="nccl")
+    return torch.device("cuda", local_rank), int(os.environ["RANK"]) == 0
+
+
+def distributed_barrier() -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+def average_gradients(model: torch.nn.Module) -> None:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return
+    world_size = torch.distributed.get_world_size()
+    for parameter in model.parameters():
+        if not parameter.requires_grad:
+            continue
+        gradient = parameter.grad
+        if gradient is None:
+            gradient = torch.zeros_like(parameter)
+        torch.distributed.all_reduce(gradient, op=torch.distributed.ReduceOp.SUM)
+        gradient.div_(world_size)
+        parameter.grad = gradient
 
 
 def set_seed(seed: int) -> None:
@@ -97,15 +132,20 @@ def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         num_workers=config["train"].get("num_workers", 4),
         pin_memory=True,
     )
+    distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if distributed else None
+    val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
     train_loader = DataLoader(
         train_dataset,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         collate_fn=train_dataset.collate_fn,
         **common,
     )
     val_loader = DataLoader(
         val_dataset,
         shuffle=False,
+        sampler=val_sampler,
         collate_fn=val_dataset.collate_fn,
         **common,
     )
@@ -207,6 +247,7 @@ def train_one_epoch(
         outputs = model(batch_to_samples(batch, device))
         loss = outputs["loss"] / grad_accum_steps
         loss.backward()
+        average_gradients(model)
         total_loss += outputs["loss"].item()
 
         if (step + 1) % grad_accum_steps == 0:
@@ -239,7 +280,12 @@ def validate(model: AudioDeepfakeLLM, val_loader: DataLoader, device: torch.devi
         for batch in val_loader:
             outputs = model(batch_to_samples(batch, device))
             val_loss += outputs["loss"].item()
-    return val_loss / len(val_loader)
+    value = torch.tensor(
+        [val_loss, len(val_loader)], device=device, dtype=torch.float64
+    )
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(value, op=torch.distributed.ReduceOp.SUM)
+    return (value[0] / value[1].clamp_min(1)).item()
 
 
 def should_save_audio_encoder(config: dict) -> bool:
@@ -270,6 +316,39 @@ def save_best_checkpoint(
     logging.info("Saved best checkpoint epoch %s (val_loss=%.4f)", epoch, val_loss)
 
 
+def save_epoch_checkpoint(
+    model: AudioDeepfakeLLM,
+    output_dir: str,
+    config: dict,
+    *,
+    epoch: int,
+    val_loss: float,
+) -> None:
+    """Save a checkpoint every epoch, in its own epoch-numbered directory.
+
+    Unlike save_best_checkpoint (overwritten whenever a new best is found)
+    this keeps one directory per epoch so any epoch can be revisited later.
+    """
+    model_cfg = config["model"]
+    out = Path(output_dir) / "epoch_ckpts" / f"epoch_{epoch}"
+    out.mkdir(parents=True, exist_ok=True)
+
+    if model_cfg.get("lora", True):
+        model.llm_model.save_pretrained(out / "lora")
+        if model.speech_proj is not None:
+            torch.save(model.speech_proj.state_dict(), out / "proj.pt")
+        if should_save_audio_encoder(config):
+            torch.save(model.audio_encoder.state_dict(), out / "audio_encoder.pt")
+    else:
+        torch.save(model.state_dict(), out / "checkpoint.pt")
+
+    meta = {"epoch": epoch, "val_loss": val_loss}
+    with open(out / "meta.json", "w") as f:
+        json.dump(meta, f)
+
+    logging.info("Saved epoch checkpoint: epoch=%s val_loss=%.4f -> %s", epoch, val_loss, out)
+
+
 def run_training_loop(
     model: AudioDeepfakeLLM,
     train_loader: DataLoader,
@@ -280,6 +359,7 @@ def run_training_loop(
     device: torch.device,
     *,
     num_epochs: int | None = None,
+    save_every_epoch: bool = True,
 ) -> None:
     num_epochs = num_epochs or config["train"]["epochs"]
     grad_accum = config["train"].get("grad_accum_steps", 1)
@@ -292,6 +372,11 @@ def run_training_loop(
         )
         avg_val = validate(model, val_loader, device)
         logging.info("Epoch %s val loss %.4f", epoch + 1, avg_val)
+
+        if save_every_epoch:
+            save_epoch_checkpoint(
+                model, output_dir, config, epoch=epoch + 1, val_loss=avg_val
+            )
 
         if avg_val < best_val:
             best_val = avg_val

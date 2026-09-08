@@ -22,13 +22,13 @@ model:
   special_tokens: []
 
 data:
-  train_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_train_2_structured.json"
-  val_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_val_2_structured.json"
-  test_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_test_2_structured.json"
+  train_path: "data/hir_sdd_reasoning_train_clean.json"
+  val_path: "data/hir_sdd_reasoning_val_clean.json"
+  test_path: "data/hir_sdd_reasoning_test_clean.json"
   prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 4
+  batch_size: 2
   epochs: 1
   lr: 1e-5          # Global fallback LR
   lr_adapter: 1e-5  
@@ -36,12 +36,12 @@ train:
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
   seed: 2
-  grad_accum_steps: 4
+  grad_accum_steps: 8
   grpo:
     enabled: true
     start_epoch: 0
     num_rollouts: 4
-    max_new_tokens: 128
+    max_new_tokens: 150
     temperature: 0.8
     top_p: 0.9
     repetition_penalty: 1.1

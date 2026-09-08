@@ -19,7 +19,7 @@ mkdir -p logs
 
 CONFIG=${1:-config.yaml}
 CHECKPOINT=${2}
-OUTPUT_DIR=${CHECKPOINT%/}/stage2_explanation_output
+OUTPUT_DIR=${CHECKPOINT%/}/new_stage2_output
 echo "Running with config: ${CONFIG}"
 
 pip install -r requirements.txt

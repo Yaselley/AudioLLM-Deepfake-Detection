@@ -50,6 +50,19 @@ def _load_pretrained(
         model.audio_encoder.load_state_dict(torch.load(enc, map_location="cpu"))
     if not proj.is_file() and not enc.is_file():
         raise FileNotFoundError(f"No checkpoint found under {checkpoint_dir}")
+    lora_dir = Path(checkpoint_dir) / (
+        f"lora_{checkpoint_epoch}"
+        if checkpoint_epoch != "best"
+        else "lora_best"
+    )
+
+    if lora_dir.is_dir():
+        logging.info("Loading LoRA adapter from %s", lora_dir)
+        model.llm_model.load_adapter(
+            str(lora_dir),
+            adapter_name="default",
+            is_trainable=True,
+        )
 
 
 def _configure_stage2_params(model, config: dict) -> list:
@@ -99,22 +112,19 @@ def main(
 ) -> None:
     maybe_hf_login(hf_token)
     config = load_config(config_path)
-    config["model"]["lora"] = True
-    if output_dir is not None:
-        output_dir = str(Path(output_dir).expanduser().resolve())
+    # config["model"]["lora"] = True
+    if output_dir:
         config["output_dir"] = output_dir
     output_dir = config.get("output_dir", "./output")
-    output_dir = str(Path(output_dir).expanduser().resolve())
 
     setup_logging(output_dir, log_name="train_stage2.log")
     save_config(config, output_dir)
-    logging.info("Output directory: %s", output_dir)
     logging.info("Pretrained checkpoint: %s", pretrained_checkpoint)
 
     set_seed(config["train"].get("seed", 42))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = build_model(config["model"], force_lora=True)
+    model = build_model(config["model"])
     _load_pretrained(model, pretrained_checkpoint, checkpoint_epoch)
     model.to(device)
 
