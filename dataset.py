@@ -14,6 +14,18 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="librosa.core.audio")
 warnings.filterwarnings("ignore", category=UserWarning)
 
+
+def load_audio_file(audio_path, sample_rate=16000, max_audio_sec=10):
+    try:
+        audio, _ = librosa.load(audio_path, sr=sample_rate)
+    except Exception as e:
+        logging.error(f"Error reading {audio_path}: {e}")
+        audio = np.zeros(sample_rate)
+
+    max_audio_len = int(sample_rate * max_audio_sec)
+    return torch.from_numpy(audio[:max_audio_len]).float()
+
+
 class AudioDeepfakeDataset(Dataset):
     def __init__(self, json_path, prompt_path=None, sample_rate=16000):
         super().__init__()
@@ -53,19 +65,9 @@ class AudioDeepfakeDataset(Dataset):
         item = self.data[index]
         audio_path = item["path"]
         label_str = item.get("text", "Real") # "real" or "fake"
-        # Load Audio
-        try:
-            audio, _ = librosa.load(audio_path, sr=self.sample_rate)
-        except Exception as e:
-            logging.error(f"Error reading {audio_path}: {e}")
-            audio = np.zeros(self.sample_rate) # 1 sec silence
-
-        # Hard cap: keep at most 10 seconds of audio
-        if audio.shape[0] > self.max_audio_len:
-            audio = audio[: self.max_audio_len]
-
-        # Convert to Tensor
-        raw_wav = torch.from_numpy(audio).float()
+        raw_wav = load_audio_file(
+            audio_path, sample_rate=self.sample_rate, max_audio_sec=self.max_audio_sec
+        )
 
         # Text Label
         text_target = label_str

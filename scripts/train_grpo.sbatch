@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=audillm_train
 #SBATCH --partition=H100,H100-PCI,H100-SLT,H200,H200-PCI,B200
-#SBATCH --gres=gpu:8
+#SBATCH --gres=gpu:1
 #SBATCH --mem=100G
 #SBATCH --cpus-per-task=1
 #SBATCH --time=24:00:00

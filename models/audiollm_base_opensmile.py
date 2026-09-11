@@ -96,6 +96,13 @@ class AudioDeepfakeLLM(nn.Module):
         lora_rank=64,
         lora_alpha=16,
         lora_dropout=0.05,
+
+        # MLP adaptor config
+        mlp_adaptor=False,
+        mlp_hidden_dim=768,
+        mlp_dropout=0.1,
+        mlp_num_classes=2,
+        mlp_loss_weight=0.5,
         
         # Tokenizer config
         special_tokens=None,
@@ -347,8 +354,10 @@ class AudioDeepfakeLLM(nn.Module):
                 modules_to_save=modules_to_save
             )
             self.llm_model = get_peft_model(self.llm_model, self.peft_config)
+            self._break_tied_embedding_alias()
             self.llm_model.print_trainable_parameters()
-
+        else: 
+            self._break_tied_embedding_alias()
         # ====================
         # 6. Audio Projector (only for continuous embeddings)
         # ====================
@@ -367,6 +376,127 @@ class AudioDeepfakeLLM(nn.Module):
                 self.speech_proj.eval()
         else:
             self.speech_proj = None
+
+        # ====================
+        # 7. Optional MLP adaptor trained on LLM hidden states
+        # ====================
+        self.use_mlp_adaptor = mlp_adaptor
+        self.mlp_loss_weight = float(mlp_loss_weight)
+        self.mlp_adaptor = None
+        if self.use_mlp_adaptor:
+            self.mlp_adaptor = nn.Sequential(
+                nn.Linear(self.llm_model.config.hidden_size, mlp_hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(mlp_dropout),
+                nn.Linear(mlp_hidden_dim, mlp_num_classes),
+            )
+            logging.info(
+                "Initialized MLP adaptor on hidden states: %s -> %s -> %s",
+                self.llm_model.config.hidden_size,
+                mlp_hidden_dim,
+                mlp_num_classes,
+            )
+
+    def _break_tied_embedding_alias(self) -> None:
+        """Avoid safetensors save failures caused by shared embedding/lm_head memory."""
+        if not hasattr(self.llm_model, "config"):
+            return
+
+        if hasattr(self.llm_model.config, "tie_word_embeddings"):
+            self.llm_model.config.tie_word_embeddings = False
+
+        embed = self.llm_model.get_input_embeddings()
+        output = self.llm_model.get_output_embeddings()
+        if embed is None or output is None:
+            return
+
+        if embed.weight is output.weight:
+            logging.warning(
+                "Detected tied embedding and lm_head weights; cloning lm_head to avoid safetensors shared-memory save error."
+            )
+            new_lm_head = nn.Parameter(embed.weight.detach().clone())
+
+            if hasattr(self.llm_model, "lm_head"):
+                self.llm_model.lm_head.weight = new_lm_head
+            elif hasattr(self.llm_model, "model") and hasattr(self.llm_model.model, "lm_head"):
+                self.llm_model.model.lm_head.weight = new_lm_head
+            elif hasattr(self.llm_model, "base_model") and hasattr(self.llm_model.base_model, "lm_head"):
+                self.llm_model.base_model.lm_head.weight = new_lm_head
+            elif hasattr(self.llm_model, "base_model") and hasattr(self.llm_model.base_model, "model") and hasattr(self.llm_model.base_model.model, "lm_head"):
+                self.llm_model.base_model.model.lm_head.weight = new_lm_head
+
+    def _label_to_index(self, label_text: str) -> int:
+        label = str(label_text).strip().lower()
+        if label in {"real", "bonafide", "human", "positive", "genuine"}:
+            return 0
+        if label in {"fake", "spoof", "attack", "negative", "deepfake"}:
+            return 1
+        if label.isdigit():
+            return int(label)
+        # Fallback for other string labels: convert to a stable class index.
+        idx = abs(hash(label)) % 2
+        if idx == 0:
+            return 0
+        return 1
+
+    def _mean_pool_last_hidden(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+        masked = hidden_states * mask
+        denom = mask.sum(dim=1).clamp_min(1.0)
+        return masked.sum(dim=1) / denom
+
+    def get_hidden_state_logits(self, samples, prompts=None):
+        """Return pooled last-layer hidden states and MLP logits for the input prompt."""
+        raw_wav = samples["raw_wav"]
+        audio_attention_mask = samples.get("audio_attention_mask", None)
+
+        if prompts is None:
+            prompts = samples.get("prompt")
+        if prompts is None:
+            raise ValueError("Prompts must be provided")
+
+        prompt_list = prompts if isinstance(prompts, list) else [prompts]
+        has_opensmile_token = any("<OPENSMILE>" in str(p) for p in prompt_list)
+        opensmile_texts = None
+        if has_opensmile_token or self.use_opensmile:
+            if self.opensmile_extractor is None:
+                from speech_encoders.opensmile_features import OpenSMILETextExtractor
+                self.opensmile_extractor = OpenSMILETextExtractor()
+            opensmile_texts = self.extract_opensmile_text(raw_wav, audio_attention_mask)
+
+        speech_output, speech_lens = self.encode_speech(raw_wav, audio_attention_mask)
+        multi_prompt = isinstance(prompts, list)
+
+        if self.opensmile_only:
+            batch_size = len(opensmile_texts) if opensmile_texts else 1
+        else:
+            batch_size = speech_output.shape[0] if speech_output is not None else len(opensmile_texts) if opensmile_texts else 1
+        bos_token_id = self.tokenizer.bos_token_id if self.tokenizer.bos_token_id else self.tokenizer.eos_token_id
+        device = raw_wav.device
+        bos = torch.ones([batch_size, 1], dtype=torch.long, device=device) * bos_token_id
+        bos_embeds = self._get_text_embeds(bos)
+
+        inputs_embeds, attention_mask = self.prompt_wrap(
+            speech_output,
+            speech_lens,
+            prompts,
+            multi_prompt=multi_prompt,
+            padding_side="left",
+            prefix_embeds=bos_embeds,
+            opensmile_texts=opensmile_texts,
+        )
+
+        with torch.no_grad() if not self.training else contextlib.nullcontext():
+            llm_outputs = self.llm_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                return_dict=True,
+                output_hidden_states=True,
+            )
+            last_hidden = llm_outputs.hidden_states[-1] if hasattr(llm_outputs, "hidden_states") else llm_outputs.last_hidden_state
+            pooled = self._mean_pool_last_hidden(last_hidden, attention_mask)
+            logits = self.mlp_adaptor(pooled.float())
+            return pooled, logits
 
     def encode_speech(self, raw_wav: torch.Tensor, audio_attention_mask=None):
         """
@@ -967,7 +1097,18 @@ class AudioDeepfakeLLM(nn.Module):
             labels=batch_labels,
         )
         loss = outputs.loss
-        
+
+        if self.use_mlp_adaptor:
+            pooled, mlp_logits = self.get_hidden_state_logits(samples, prompts)
+            cls_targets = torch.tensor(
+                [self._label_to_index(t) for t in samples["text"]],
+                dtype=torch.long,
+                device=device,
+            )
+            cls_loss = torch.nn.functional.cross_entropy(mlp_logits, cls_targets)
+            loss = loss + self.mlp_loss_weight * cls_loss
+            return {"loss": loss, "cls_loss": cls_loss, "logits": mlp_logits}
+
         return {"loss": loss}
 
     def get_last_token_logits(self, samples, prompts=None):

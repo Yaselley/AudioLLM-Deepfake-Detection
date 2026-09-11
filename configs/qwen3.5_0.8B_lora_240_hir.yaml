@@ -28,7 +28,7 @@ data:
   # prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 8
+  batch_size: 32
   epochs: 3
   lr: 1e-5          # Global fallback LR
   lr_adapter: 1e-5

@@ -13,7 +13,7 @@ model:
   freeze_audio_encoder: false
   
   # LoRA Settings
-  lora: false
+  lora: true
   lora_rank: 64
   lora_alpha: 16
   lora_dropout: 0.05
@@ -22,28 +22,26 @@ model:
   special_tokens: []
 
 data:
-  train_path:
-    - "/netscratch/fkallel/SALMONN/data/my_hir_sdd_train_2_structured.json"
-  val_path:
-    - "/netscratch/fkallel/SALMONN/data/my_hir_sdd_val_2_structured.json"
-  test_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_test_2_structured.json"
+  train_path: "data/hir_sdd_reasoning_train_clean.json"
+  val_path: "data/hir_sdd_reasoning_val_clean.json"
+  test_path: "data/hir_sdd_reasoning_test_clean.json"
   prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 2
+  batch_size: 4
   epochs: 1
   lr: 1e-5          # Global fallback LR
   lr_adapter: 1e-5  
   lr_audio: 1e-6    # Lower LR for full fine-tuning of Whisper
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
-  seed: 42
-  grad_accum_steps: 1
+  seed: 2
+  grad_accum_steps: 4
   grpo:
     enabled: true
     start_epoch: 0
     num_rollouts: 4
-    max_new_tokens: 160
+    max_new_tokens: 150
     temperature: 0.8
     top_p: 0.9
     repetition_penalty: 1.1
@@ -51,4 +49,5 @@ train:
     kl_beta: 0.1
     log_freq: 50
 
-output_dir: "output_grpo_other/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19_reasoning"
+
+output_dir: "output_grpo_trl/qwen3.5_0.8B_lora_2_myhir_after_asvspoof19"

@@ -98,7 +98,7 @@ def save_config(config: dict, output_dir: str) -> None:
 
 def build_model(model_cfg: dict, *, force_lora: bool | None = None) -> AudioDeepfakeLLM:
     lora = force_lora if force_lora is not None else model_cfg.get("lora", True)
-    return AudioDeepfakeLLM(
+    model = AudioDeepfakeLLM(
         llm_path=model_cfg["llm_path"],
         llm_type=model_cfg.get("llm_type", "qwen2"),
         audio_encoder_path=model_cfg.get("audio_encoder_path"),
@@ -111,11 +111,25 @@ def build_model(model_cfg: dict, *, force_lora: bool | None = None) -> AudioDeep
         lora_rank=model_cfg.get("lora_rank", 64),
         lora_alpha=model_cfg.get("lora_alpha", 16),
         lora_dropout=model_cfg.get("lora_dropout", 0.05),
+        mlp_adaptor=model_cfg.get("mlp_adaptor", False),
+        mlp_hidden_dim=model_cfg.get("mlp_hidden_dim", 768),
+        mlp_dropout=model_cfg.get("mlp_dropout", 0.1),
+        mlp_num_classes=model_cfg.get("mlp_num_classes", 2),
+        mlp_loss_weight=model_cfg.get("mlp_loss_weight", 0.5),
         special_tokens=model_cfg.get("special_tokens", []),
         device_8bit=0,
         use_opensmile=model_cfg.get("use_opensmile", False),
         opensmile_only=model_cfg.get("opensmile_only", False),
     )
+    if model_cfg.get("mlp_adaptor_only", False):
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        if model.mlp_adaptor is None:
+            raise ValueError("mlp_adaptor_only requires mlp_adaptor: true")
+        for parameter in model.mlp_adaptor.parameters():
+            parameter.requires_grad = True
+        logging.info("MLP-adaptor-only training enabled; all other parameters are frozen")
+    return model
 
 
 def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
@@ -166,6 +180,8 @@ def collect_param_groups(model: AudioDeepfakeLLM, config: dict) -> tuple[list, l
             audio_enc_params.append(param)
         elif "speech_proj" in name and model.speech_proj is not None:
             adapter_params.append(param)
+        elif "mlp_adaptor" in name and model.use_mlp_adaptor:
+            adapter_params.append(param)
         else:
             llm_params.append(param)
 
@@ -184,6 +200,12 @@ def collect_param_groups(model: AudioDeepfakeLLM, config: dict) -> tuple[list, l
         f"{sum(p.numel() for p in adapter_params):,}",
         train_cfg.get("lr_adapter", train_cfg.get("lr", 1e-4)),
     )
+    if model.use_mlp_adaptor:
+        logging.info(
+            "  MLP adaptor:    %s (lr=%s)",
+            f"{sum(p.numel() for p in model.mlp_adaptor.parameters() if p.requires_grad):,}",
+            train_cfg.get("lr_adapter", train_cfg.get("lr", 1e-4)),
+        )
     logging.info(
         "  LLM / LoRA:     %s (lr=%s)",
         f"{sum(p.numel() for p in llm_params):,}",
@@ -306,9 +328,11 @@ def save_best_checkpoint(
     model_cfg = config["model"]
     out = Path(output_dir)
     if model_cfg.get("lora", True):
-        model.llm_model.save_pretrained(out / "lora_best")
+        model.llm_model.save_pretrained(out / "lora_best", safe_serialization=False)
         if model.speech_proj is not None:
             torch.save(model.speech_proj.state_dict(), out / "proj_best.pt")
+        if model.use_mlp_adaptor and model.mlp_adaptor is not None:
+            torch.save(model.mlp_adaptor.state_dict(), out / "mlp_adaptor_best.pt")
         if should_save_audio_encoder(config):
             torch.save(model.audio_encoder.state_dict(), out / "audio_encoder_best.pt")
     else:
@@ -334,9 +358,11 @@ def save_epoch_checkpoint(
     out.mkdir(parents=True, exist_ok=True)
 
     if model_cfg.get("lora", True):
-        model.llm_model.save_pretrained(out / "lora")
+        model.llm_model.save_pretrained(out / "lora", safe_serialization=False)
         if model.speech_proj is not None:
             torch.save(model.speech_proj.state_dict(), out / "proj.pt")
+        if model.use_mlp_adaptor and model.mlp_adaptor is not None:
+            torch.save(model.mlp_adaptor.state_dict(), out / "mlp_adaptor.pt")
         if should_save_audio_encoder(config):
             torch.save(model.audio_encoder.state_dict(), out / "audio_encoder.pt")
     else:
@@ -410,7 +436,7 @@ def save_step_checkpoint(
     ckpt_dir.mkdir(exist_ok=True)
 
     if model_cfg.get("lora", True):
-        model.llm_model.save_pretrained(ckpt_dir / "lora")
+        model.llm_model.save_pretrained(ckpt_dir / "lora", safe_serialization=False)
         if model.speech_proj is not None:
             torch.save(model.speech_proj.state_dict(), ckpt_dir / "proj.pt")
         if should_save_audio_encoder(config):
@@ -456,6 +482,10 @@ def load_step_checkpoint(
         proj_path = ckpt_dir / "proj.pt"
         if model.speech_proj is not None and proj_path.is_file():
             model.speech_proj.load_state_dict(torch.load(proj_path, map_location="cpu"))
+        if model.use_mlp_adaptor and model.mlp_adaptor is not None:
+            mlp_path = ckpt_dir / "mlp_adaptor.pt"
+            if mlp_path.is_file():
+                model.mlp_adaptor.load_state_dict(torch.load(mlp_path, map_location="cpu"))
         enc_path = ckpt_dir / "audio_encoder.pt"
         if should_save_audio_encoder(config) and enc_path.is_file():
             model.audio_encoder.load_state_dict(torch.load(enc_path, map_location="cpu"))

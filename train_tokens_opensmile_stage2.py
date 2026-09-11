@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenSmile stage-2 training: fresh LoRA + load stage-1 encoder/adapter weights."""
+"""Stage-2 training from a previously trained SFT or GRPO checkpoint."""
 
 from __future__ import annotations
 
@@ -69,6 +69,21 @@ def _configure_stage2_params(model, config: dict) -> list:
     """Enable gradients for LoRA, adapter, and optionally the audio encoder."""
     freeze_enc = config["model"].get("freeze_audio_encoder", False)
     groups = {"audio": [], "adapter": [], "lora": []}
+
+    if config["model"].get("mlp_adaptor_only", False):
+        for name, param in model.named_parameters():
+            param.requires_grad = "mlp_adaptor" in name
+            if param.requires_grad:
+                groups["adapter"].append(param)
+        logging.info(
+            "MLP-adaptor-only stage-2 training — trainable params: %s",
+            sum(param.numel() for param in groups["adapter"]),
+        )
+        train_cfg = config["train"]
+        return [{
+            "params": groups["adapter"],
+            "lr": float(train_cfg.get("lr_adapter", train_cfg.get("lr", 1e-4))),
+        }]
 
     for name, param in model.named_parameters():
         if "audio_encoder" in name:

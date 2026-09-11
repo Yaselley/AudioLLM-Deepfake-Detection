@@ -22,9 +22,9 @@ model:
   special_tokens: []
 
 data:
-  train_path: "data/hir_sdd_reasoning_train_clean.json"
-  val_path: "data/hir_sdd_reasoning_val_clean.json"
-  test_path: "data/hir_sdd_reasoning_test_clean.json"
+  train_path: "data/hir_sdd_reasoning_train_final.json"
+  val_path: "data/hir_sdd_reasoning_val_final.json"
+  test_path: "data/hir_sdd_reasoning_test_final.json"
   prompt_path: "prompts/train_prompt.json"
 
 train:

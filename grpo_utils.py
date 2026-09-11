@@ -100,7 +100,7 @@ def reasoning_reward(prediction, ground_truth):
 
 
 
-def format_reward(prediction) -> float:
+def format_reward(prediction, ground_truth) -> float:
     text = str(prediction).strip()
     schema = _detected_schema(text)
 
@@ -114,11 +114,16 @@ def format_reward(prediction) -> float:
             return 0.0
         if not reasoning_ok or not reasoning_nonempty:
             return 0.33
-
-        ordered = bool(re.match(
-            r"^\s*<reasoning>.+?</reasoning>\s*<answer>.+?</answer>\s*$",
-            text, re.IGNORECASE | re.DOTALL,
-        ))
+        if ground_truth.startswith("<answer>"):
+            ordered = bool(re.match(
+                r"^\s*<answer>.+?</answer>\s*<reasoning>.+?</reasoning>\s*$",
+                text, re.IGNORECASE | re.DOTALL,
+            ))
+        else:
+            ordered = bool(re.match(
+                r"^\s*<reasoning>.+?</reasoning>\s*<answer>.+?</answer>\s*$",
+                text, re.IGNORECASE | re.DOTALL,
+            ))
         return 1.0 if ordered else 0.66
 
     if schema == "tagged_bottom_up":
@@ -159,7 +164,5 @@ def compute_reward(prediction_text, ground_truth_text) -> float:
     else:
         reward += REWARD_WEIGHTS["label_incorrect"]
 
-    reward += REWARD_WEIGHTS["format"] * format_reward(prediction_text)
-    # logging.info("[GRPO] compute_reward: prediction_text=%s, ground_truth_text=%s, pred_label=%s, gt_label=%s, label_correct=%s, reasoning_reward=%.4f, format_reward=%.4f, total_reward=%.4f",
-    #              prediction_text, ground_truth_text, pred_label, gt_label, label_correct, reasoning_reward(prediction_text, ground_truth_text), format_reward(prediction_text), reward)
+    reward += REWARD_WEIGHTS["format"] * format_reward(prediction_text, ground_truth_text)
     return float(reward)

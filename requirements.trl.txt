@@ -1,0 +1,5 @@
+# Compatible stack for train_grpo_trl.py
+accelerate
+peft
+transformers
+trl

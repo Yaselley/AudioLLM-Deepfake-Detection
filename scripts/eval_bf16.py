@@ -222,7 +222,7 @@ def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False
         if os.path.exists(checkpoint_path):
             print(f"Loading checkpoint from {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-            # Manual loading with key renaming to avoid shape mismatch (Fairseq vs HF, encoder nesting, LLM wrapping)
+            # Manual loading with key renaming to avoid shape mismatch (Fairseg vs HF, encoder nesting, LLM wrapping)
             model_state_dict = model.state_dict()
             pretrained_dict = {}
             shape_mismatch_keys = []
@@ -264,6 +264,14 @@ def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False
                 print("Confirmed: audio_encoder weights loaded from checkpoint.")
             else:
                 print("WARNING: audio_encoder weights NOT loaded from checkpoint!")
+
+    if getattr(model, "use_mlp_adaptor", False) and model.mlp_adaptor is not None:
+        mlp_path = os.path.join(checkpoint_dir, f"mlp_adaptor_{epoch}.pt")
+        if not os.path.exists(mlp_path):
+            mlp_path = os.path.join(checkpoint_dir, "mlp_adaptor_best.pt")
+        if os.path.exists(mlp_path):
+            print(f"Loading MLP adaptor weights from {mlp_path}")
+            model.mlp_adaptor.load_state_dict(torch.load(mlp_path, map_location="cpu", weights_only=True))
 
     # Move to device
     model.to(device)
