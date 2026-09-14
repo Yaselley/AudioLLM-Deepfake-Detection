@@ -10,7 +10,7 @@ api = HfApi()
 #             repo_type="model",
 #             exist_ok=True,   # won't error if it already exists
 #             private=False,    # or False, your choice
-#             token="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"
+#             token="..."
 #         )
 #         upload_folder(
 #             repo_id=f"fedikallel/Qwen3.5_{size}_lora_{seed}_LA19_stage2_binaryHIRSDD",
@@ -19,7 +19,7 @@ api = HfApi()
 #             commit_message="Uploading model from cluster",
 #             repo_type="model",
 #             ignore_patterns=["*stage2_reasoning_output*","*stage2_output*", "*stage2_explanation_output*", "*real_stage2_output*"],
-#             token="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"
+#             token="..."
 #         )
 
 for size in ["0.8B", "4B"]:
@@ -29,7 +29,7 @@ for size in ["0.8B", "4B"]:
             repo_type="model",
             exist_ok=True,   # won't error if it already exists
             private=False,    # or False, your choice
-            token="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"
+            token="..."
         )
         upload_folder(
             repo_id=f"fedikallel/Qwen3.5_{size}_no_lora_{seed}_LA19_stage2_binaryHIRSDD",
@@ -38,5 +38,5 @@ for size in ["0.8B", "4B"]:
             commit_message="Uploading model from cluster",
             repo_type="model",
             ignore_patterns=["*stage2_reasoning_output*","*stage2_output*", "*stage2_explanation_output*", "*real_stage2_output*"],
-            token="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"
+            token="..."
         )
