@@ -25,7 +25,7 @@ data:
   train_path: "data/hir_sdd_explanation_train_clean.json"
   val_path: "data/hir_sdd_explanation_val_clean.json"
   test_path: "data/hir_sdd_explanation_test_clean.json"
-  prompt_path: "prompts/train_prompt.json"
+  prompt_path: "prompts/train_prompt_explanation.json"
 
 train:
   batch_size: 4

@@ -24,7 +24,8 @@ class AudioDeepfakeTRLModel(nn.Module):
     def __init__(self, audio_model):
         super().__init__()
         self.audio_model = audio_model
-        self.llm_model = getattr(audio_model, "llm_model", audio_model)
+        # Keep the compatibility alias out of nn.Module's registered children.
+        object.__setattr__(self, "llm_model", getattr(audio_model, "llm_model", audio_model))
         self.config = getattr(
             self.llm_model,
             "config",

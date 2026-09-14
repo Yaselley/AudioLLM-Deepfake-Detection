@@ -28,15 +28,15 @@ data:
   prompt_path: "prompts/train_prompt.json"
 
 train:
-  batch_size: 2
+  batch_size: 4
   epochs: 1
   lr: 1e-5          # Global fallback LR
   lr_adapter: 1e-5  
   lr_audio: 1e-6    # Lower LR for full fine-tuning of Whisper
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
-  seed: 2
-  grad_accum_steps: 8
+  seed: 42
+  grad_accum_steps: 4
   grpo:
     enabled: true
     start_epoch: 0
@@ -50,4 +50,4 @@ train:
     log_freq: 50
 
 
-output_dir: "output_grpo/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19/lora_2_explanation_stage2_output"
+output_dir: "output_grpo_trl/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19/new_lora_2_reasoning_stage2_output"

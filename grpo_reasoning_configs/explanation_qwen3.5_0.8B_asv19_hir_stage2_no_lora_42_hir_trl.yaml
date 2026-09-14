@@ -22,12 +22,10 @@ model:
   special_tokens: []
 
 data:
-  train_path:
-    - "/netscratch/fkallel/SALMONN/data/my_hir_sdd_train_2_structured.json"
-  val_path:
-    - "/netscratch/fkallel/SALMONN/data/my_hir_sdd_val_2_structured.json"
-  test_path: "/netscratch/fkallel/SALMONN/data/my_hir_sdd_test_2_structured.json"
-  prompt_path: "prompts/train_prompt.json"
+  train_path: "data/hir_sdd_explanation_train_clean.json"
+  val_path: "data/hir_sdd_explanation_val_clean.json"
+  test_path: "data/hir_sdd_explanation_test_clean.json"
+  prompt_path: "prompts/train_prompt_explanation.json"
 
 train:
   batch_size: 4
@@ -42,8 +40,8 @@ train:
   grpo:
     enabled: true
     start_epoch: 0
-    num_rollouts: 8
-    max_new_tokens: 160
+    num_rollouts: 4
+    max_new_tokens: 150
     temperature: 0.8
     top_p: 0.9
     repetition_penalty: 1.1
@@ -51,4 +49,5 @@ train:
     kl_beta: 0.1
     log_freq: 50
 
-output_dir: "output_grpo/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19_reasoning"
+
+output_dir: "output_grpo_trl/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19/no_lora_42_explanation_stage2_output"

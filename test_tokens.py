@@ -314,42 +314,88 @@ def evaluate_split(
     total_loss = 0.0
     batch_count = 0
 
+    use_mlp_adaptor = bool(getattr(model, "use_mlp_adaptor", False) and getattr(model, "mlp_adaptor", None) is not None)
+
     for batch_idx, batch in enumerate(loader):
         samples = batch_to_samples(batch, device)
-
-        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-            with torch.no_grad():
-                forward_result = model(samples, verbose=True)
-
-        loss = forward_result.get("loss", 0.0)
-        total_loss += loss.item()
-
-        prompts = batch["prompt"]
-        generated_texts = model.generate(samples, generate_cfg, prompts=prompts)
-
         ground_truth_texts = batch["text"]
-        for i, (pred_text, gt_text) in enumerate(zip(generated_texts, ground_truth_texts)):
-            pred_label = _extract_label(pred_text)
-            true_label = _extract_label(gt_text)
-            if pred_label == 1 and true_label == 1:
-                tp += 1
-            elif pred_label == 0 and true_label == 0:
-                tn += 1
-            elif pred_label == 1 and true_label == 0:
-                fp += 1
-            elif pred_label == 0 and true_label == 1:
-                fn += 1
-            total_samples += 1
 
-        for item_id, pred_text, gt_text, prompt in zip(batch.get("path", [""] * len(ground_truth_texts)), generated_texts, ground_truth_texts, prompts):
-            results.append(
-                {
-                    "id": item_id,
-                    "ground_truth": gt_text,
-                    "prediction": pred_text,
-                    "prompt": prompt,
-                }
-            )
+        if use_mlp_adaptor:
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                with torch.no_grad():
+                    pooled, mlp_logits = model.get_hidden_state_logits(samples, prompts=batch["prompt"])
+            probs = torch.softmax(mlp_logits.float(), dim=-1)
+            # For the trained MLP head, class 0 = real/bonafide and class 1 = fake/spoof,
+            # matching the label mapping in _label_to_index() in the model.
+            probs_real = probs[:, 0]
+            probs_fake = probs[:, 1]
+            pred_labels = (probs_real > probs_fake).long()
+            pred_texts = ["Real" if int(label) == 1 else "Fake" for label in pred_labels.tolist()]
+
+            for i, (pred_text, gt_text) in enumerate(zip(pred_texts, ground_truth_texts)):
+                pred_label = _extract_label(pred_text)
+                true_label = _extract_label(gt_text)
+                if pred_label == 1 and true_label == 1:
+                    tp += 1
+                elif pred_label == 0 and true_label == 0:
+                    tn += 1
+                elif pred_label == 1 and true_label == 0:
+                    fp += 1
+                elif pred_label == 0 and true_label == 1:
+                    fn += 1
+                total_samples += 1
+
+            for item_id, pred_text, gt_text, prompt, score_real, score_fake in zip(
+                batch.get("path", [""] * len(ground_truth_texts)),
+                pred_texts,
+                ground_truth_texts,
+                batch["prompt"],
+                probs_real.cpu().tolist(),
+                probs_fake.cpu().tolist(),
+            ):
+                results.append(
+                    {
+                        "id": item_id,
+                        "ground_truth": gt_text,
+                        "prediction": pred_text,
+                        "prompt": prompt,
+                        "score_real": float(score_real),
+                        "score_fake": float(score_fake),
+                    }
+                )
+        else:
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                with torch.no_grad():
+                    forward_result = model(samples, verbose=True)
+
+            loss = forward_result.get("loss", 0.0)
+            total_loss += loss.item()
+
+            prompts = batch["prompt"]
+            generated_texts = model.generate(samples, generate_cfg, prompts=prompts)
+
+            for i, (pred_text, gt_text) in enumerate(zip(generated_texts, ground_truth_texts)):
+                pred_label = _extract_label(pred_text)
+                true_label = _extract_label(gt_text)
+                if pred_label == 1 and true_label == 1:
+                    tp += 1
+                elif pred_label == 0 and true_label == 0:
+                    tn += 1
+                elif pred_label == 1 and true_label == 0:
+                    fp += 1
+                elif pred_label == 0 and true_label == 1:
+                    fn += 1
+                total_samples += 1
+
+            for item_id, pred_text, gt_text, prompt in zip(batch.get("path", [""] * len(ground_truth_texts)), generated_texts, ground_truth_texts, prompts):
+                results.append(
+                    {
+                        "id": item_id,
+                        "ground_truth": gt_text,
+                        "prediction": pred_text,
+                        "prompt": prompt,
+                    }
+                )
 
         batch_count += 1
         if save_json and batch_count % save_freq == 0:
