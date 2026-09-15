@@ -50,4 +50,4 @@ train:
     log_freq: 50
 
 
-output_dir: "output_grpo_trl/qwen3.5_0.8B_lora_2_myhir_after_asvspoof19"
+output_dir: "output_grpo_trl/lora_2_reasoning_stage2_output"

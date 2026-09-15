@@ -1,0 +1,53 @@
+model:
+  # LLM Settings
+  # llm_path: "meta-llama/Llama-3.1-8B-Instruct" 
+  # llm_type: "llama" # "qwen2", "qwen3", "llama"
+  llm_path: "/netscratch/fkallel/models/Qwen3.5-0.8B/" 
+  llm_type: "qwen3.5" # "qwen2", "qwen3", "llama"
+
+  # Audio Encoder Settings
+  audio_encoder_path: "/ds-slt/audio_weights/xlsr2_300m.pt"
+  audio_encoder_type: "wav2vec2" 
+  audio_encoder_source: "fairseq" 
+
+  freeze_audio_encoder: false
+  
+  # LoRA Settings
+  lora: true
+  lora_rank: 64
+  lora_alpha: 16
+  lora_dropout: 0.05
+  
+  # Special Tokens (optional)
+  special_tokens: []
+
+data:
+  train_path: "data/hir_sdd_reasoning_train_clean.json"
+  val_path: "data/hir_sdd_reasoning_val_clean.json"
+  test_path: "data/hir_sdd_reasoning_test_clean.json"
+  prompt_path: "prompts/train_prompt.json"
+
+train:
+  batch_size: 4
+  epochs: 1
+  lr: 1e-5          # Global fallback LR
+  lr_adapter: 1e-5  
+  lr_audio: 1e-6    # Lower LR for full fine-tuning of Whisper
+  lr_lora: 1e-5     # Standard LoRA LR
+  num_workers: 4
+  seed: 240
+  grad_accum_steps: 4
+  grpo:
+    enabled: true
+    start_epoch: 0
+    num_rollouts: 4
+    max_new_tokens: 150
+    temperature: 0.8
+    top_p: 0.9
+    repetition_penalty: 1.1
+    clip_epsilon: 0.2
+    kl_beta: 0.1
+    log_freq: 50
+
+
+output_dir: "output_grpo_trl/lora_240_reasoning_stage2_output"
