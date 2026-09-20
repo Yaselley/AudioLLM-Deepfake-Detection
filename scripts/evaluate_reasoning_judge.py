@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate HIR-SDD test generations with a local MS-Swift LLM judge."""
+"""Prepare and merge HIR-SDD reasoning scores from a Groq LLM judge."""
 
 from __future__ import annotations
 
@@ -31,12 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True, help="Merged per-record scores JSONL")
     parser.add_argument("--prediction-key", help="Field containing the generated answer")
     parser.add_argument("--reference-key", help="Field containing the reference answer/reasoning")
-    parser.add_argument("--model", default="Qwen/Qwen3.5-35B-A3B")
-    parser.add_argument("--max-batch-size", type=int, default=8)
-    parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--port", type=int, default=29534)
-    parser.add_argument("--prompt-file", type=Path, help="JSON file for the prepared MS-Swift prompts")
-    parser.add_argument("--swift-output", type=Path, help="Existing MS-Swift output; merge scores into --output")
+    parser.add_argument("--model", default="openai/gpt-oss-120b")
+    parser.add_argument("--prompt-file", type=Path, help="JSON file for the prepared judge prompts")
+    parser.add_argument("--judge-output", type=Path, help="Raw local judge output; required during merge")
     parser.add_argument("--prepare-only", action="store_true", help="Write prompts only; do not call the model")
     parser.add_argument("--limit", type=int, help="Evaluate only the first N records")
     return parser.parse_args()
@@ -65,12 +62,17 @@ def find_field(record: dict[str, Any], requested: str | None, defaults: tuple[st
     raise KeyError(f"no {label} field found; tried {', '.join(key for key in keys if key)}")
 
 
-def build_prompt(criterion: str, reference: str, prediction: str) -> str:
+def build_prompt(reference: str, prediction: str) -> str:
     return (
-        f"{SYSTEM_PROMPT} USER: You are a strict judge. {CRITERIA[criterion]} "
-        "Output ONLY a single integer from 1 to 10.\n\n"
+        f"{SYSTEM_PROMPT} USER: You are a strict judge. Evaluate the Answer on all four criteria:\n"
+        "1. Correctness: how well the Answer matches the Reference conclusion.\n"
+        "2. Reasoning quality: detailed analysis matching the Reference.\n"
+        "3. Comprehensiveness: coverage of all key points in the Reference.\n"
+        "4. Logic: coherence between the evidence and the conclusion.\n\n"
         f"Reference: {reference}\n\nAnswer: {prediction}\n\n"
-        "Score (1-10): ASSISTANT:"
+        "Output ONLY these four lines, with integer scores from 1 to 10:\n"
+        "Correctness: X\nReasoning quality: Y\nComprehensiveness: Z\nLogic: W\n"
+        "ASSISTANT:"
     )
 
 
@@ -79,20 +81,28 @@ def write_swift_prompts(records: list[dict[str, Any]], path: Path, prediction_ke
     for record_index, record in enumerate(records):
         prediction, _ = find_field(record, prediction_key, DEFAULT_PREDICTION_KEYS, "prediction")
         reference, _ = find_field(record, reference_key, DEFAULT_REFERENCE_KEYS, "reference")
-        for criterion in CRITERIA:
-            prompts.append({
-                "record_index": record_index,
-                "criterion": criterion,
-                "messages": [{"role": "user", "content": build_prompt(criterion, reference, prediction)}],
-            })
+        prompts.append({
+            "record_index": record_index,
+            "messages": [{"role": "user", "content": build_prompt(reference, prediction)}],
+        })
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(prompts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return prompts
 
 
-def parse_score(text: str) -> float | None:
-    match = re.search(r"(?<!\d)(10|[1-9])(?!\d)", text or "")
-    return float(match.group(1)) if match else None
+def parse_scores(text: str) -> dict[str, float | None]:
+    labels = {
+        "correctness": r"correctness",
+        "reasoning_quality": r"reasoning\s+quality",
+        "comprehensiveness": r"comprehensiveness",
+        "logic": r"logic",
+    }
+    scores = {criterion: None for criterion in CRITERIA}
+    for criterion, label in labels.items():
+        match = re.search(rf"{label}\s*[:=]\s*(10|[1-9])(?!\d)", text or "", re.IGNORECASE)
+        if match:
+            scores[criterion] = float(match.group(1))
+    return scores
 
 
 def response_text(record: dict[str, Any]) -> str:
@@ -115,8 +125,8 @@ def main() -> None:
 
     if args.prepare_only and not args.prompt_file:
         raise ValueError("--prompt-file is required with --prepare-only")
-    if not args.prepare_only and not args.swift_output:
-        raise ValueError("model inference is intentionally separate; provide --swift-output to merge MS-Swift results")
+    if not args.prepare_only and not args.judge_output:
+        raise ValueError("model inference is intentionally separate; provide --judge-output to merge results")
     prompt_file = args.prompt_file or args.output.with_name(f"{args.output.stem}_prompts.json")
     prompts = write_swift_prompts(records, prompt_file, args.prediction_key, args.reference_key)
 
@@ -124,17 +134,20 @@ def main() -> None:
         print(json.dumps({"records": len(records), "judge_calls": len(prompts), "prompt_file": str(prompt_file)}, indent=2))
         return
 
-    swift_records = load_records(args.swift_output)
-    if len(swift_records) != len(prompts):
-        raise ValueError(f"MS-Swift returned {len(swift_records)} records for {len(prompts)} prompts")
+    judge_records = load_records(args.judge_output)
+    if len(judge_records) != len(prompts):
+        raise ValueError(f"Judge returned {len(judge_records)} records for {len(prompts)} prompts")
 
     grouped: list[dict[str, Any]] = [dict(record) for record in records]
-    for prompt, swift_record in zip(prompts, swift_records):
-        judge_response = response_text(swift_record)
-        grouped[prompt["record_index"]].setdefault("judge", {})[prompt["criterion"]] = {
+    for prompt, judge_record in zip(prompts, judge_records):
+        judge_response = response_text(judge_record)
+        scores = parse_scores(judge_response)
+        judge = grouped[prompt["record_index"]].setdefault("judge", {})
+        for criterion, score in scores.items():
+            judge[criterion] = {
             "response": judge_response,
-            "score": parse_score(judge_response),
-        }
+                "score": score,
+            }
     for record in grouped:
         scores = [item["score"] for item in record["judge"].values() if item["score"] is not None]
         record["judge_summary"] = {"model": args.model, "mean_score": sum(scores) / len(scores) if scores else None}
@@ -152,6 +165,17 @@ def main() -> None:
     with args.output.open("w", encoding="utf-8") as handle:
         for record in grouped:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(json.dumps({"records": len(grouped), "judge_calls": len(prompts), "aspect_means": aspect_means, "output": str(args.output)}, indent=2))
+
+    summary = {"records": len(grouped), "judge_calls": len(prompts), "aspect_means": aspect_means, "output": str(args.output)}
+    summary_text = json.dumps(summary, indent=2)
+
+    # print in parent/test.log
+    log_path = args.output.parent / "test.log"
+    with log_path.open("a", encoding="utf-8") as log_handle:
+        log_handle.write(summary_text + "\n")
+
+    print(summary_text)
+
+
 if __name__ == "__main__":
     main()
