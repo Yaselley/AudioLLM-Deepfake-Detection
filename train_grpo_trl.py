@@ -8,6 +8,7 @@ from pathlib import Path
 from datasets import Dataset as HFDataset
 from trl import GRPOConfig
 from transformers.trainer_utils import get_last_checkpoint
+import torch
 
 from dataset import AudioDeepfakeDataset
 from grpo_utils import compute_reward
@@ -21,8 +22,55 @@ from train_common import (
     set_seed,
     setup_logging,
 )
-from train_grpo import _load_pretrained
 from trl_grpo import make_audio_grpo_trainer
+
+def _load_pretrained(
+    model,
+    checkpoint_dir: str,
+    checkpoint_epoch: str,
+) -> None:
+    ckpt = Path(checkpoint_dir) / f"checkpoint_{checkpoint_epoch}.pt"
+    if ckpt.is_file():
+        logging.info("Loading full checkpoint %s", ckpt)
+        state = torch.load(ckpt, map_location="cpu")
+        model_state = model.state_dict()
+        loaded = {}
+        for key, value in state.items():
+            if key in model_state and value.shape == model_state[key].shape:
+                loaded[key] = value
+        model.load_state_dict(loaded, strict=False)
+        logging.info("Loaded %s matching tensors from checkpoint", len(loaded))
+        return
+
+    proj = Path(checkpoint_dir) / f"proj_{checkpoint_epoch}.pt"
+    enc = Path(checkpoint_dir) / f"audio_encoder_{checkpoint_epoch}.pt"
+    mlp = Path(checkpoint_dir) / f"mlp_adaptor_{checkpoint_epoch}.pt"
+    if model.speech_proj is not None and proj.is_file():
+        logging.info("Loading projector from %s", proj)
+        model.speech_proj.load_state_dict(torch.load(proj, map_location="cpu"))
+    if enc.is_file():
+        logging.info("Loading audio encoder from %s", enc)
+        model.audio_encoder.load_state_dict(torch.load(enc, map_location="cpu"))
+    if model.use_mlp_adaptor and model.mlp_adaptor is not None and mlp.is_file():
+        logging.info("Loading MLP adaptor from %s", mlp)
+        model.mlp_adaptor.load_state_dict(torch.load(mlp, map_location="cpu"))
+    if not proj.is_file() and not enc.is_file():
+        raise FileNotFoundError(f"No checkpoint found under {checkpoint_dir}")
+    lora_dir = Path(checkpoint_dir) / (
+        f"lora_{checkpoint_epoch}"
+        if checkpoint_epoch != "best"
+        else "lora_best"
+    )
+
+    if lora_dir.is_dir():
+        logging.info("Loading LoRA adapter from %s", lora_dir)
+        model.llm_model.load_adapter(
+            str(lora_dir),
+            adapter_name="default",
+            is_trainable=True,
+        )
+
+
 
 
 def reward_func(prompts, completions, text, **kwargs):

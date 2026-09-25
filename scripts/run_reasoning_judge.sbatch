@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hir-sdd-judge
 #SBATCH --partition=H100,H100-SLT,H100-PCI,H200,H200-PCI
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --mem=120G
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/hir_sdd_judge_%j.out
@@ -16,27 +16,12 @@ set -uo pipefail   # note: no -e here — one failed eval dir must not kill the 
 ROOT=/netscratch/fkallel/AudioLLM-Deepfake-Detection
 SCRIPT="$ROOT/scripts/evaluate_reasoning_judge.py"
 CONSISTENCY_SCRIPT="$ROOT/scripts/compare_judge_consistency.py"
-
-# Only score the newly added reference judges.
+# Only score the Selene judge.
 # GPT-OSS was already completed and is intentionally excluded here.
 JUDGE_MODELS=(
-  # "google/gemma-4-31B-it"
-  "deepseek-ai/DeepSeek-V4-Flash"
+  "AtlaAI/Selene-1-Llama-3.3-70B"
 )
 
-# --- Discover every eval dir across all the locations you listed ---
-#
-# 1) output_v25 / output_v26: <root>/<model>/evals            (as before)
-# 2) output_v5/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19: a PARENT to search
-#    under, i.e. <that path>/<subdir>/evals — same pattern as v25/v26
-# 3) output_v6/qwen3.5_0.8B_lora_{2,42,240}_asv19/{new_new_reasoning_stage2_output,
-#    new_new_explanation_stage2_output}: evals inside each stage-output subdir
-# 4) output_grpo_trl: <root>/<model>/evals (same pattern as v25/v26), plus
-#    output_grpo_trl/qwen3.5_0.8B_no_lora_2_myhir_asvspoof19, which is ALSO a
-#    parent to search under (same one-level-deeper pattern as #2)
-#
-# Adjust the mindepth/maxdepth for any of these that don't match your actual
-# layout — the printed list below will make a mismatch obvious immediately.
 mapfile -d '' EVAL_DIRS < <(
   {
     find "$ROOT/output_v25" "$ROOT/output_v26" \
@@ -66,20 +51,14 @@ if [[ ${#EVAL_DIRS[@]} -eq 0 ]]; then
 fi
 
 cd "$ROOT"
+pip install --no-cache-dir -U "huggingface_hub[hf_xet]"
 pip uninstall -y vllm flashinfer triton torch torchvision torchaudio transformers
 pip install --no-cache-dir \
   torch==2.11.0 \
   torchaudio==2.11.0 \
   torchvision==0.26.0 \
   transformers==5.14.1 \
-  "vllm==0.20.1"
-module avail cuda
-find / -name "libnvrtc.so*" 2>/dev/null
-python -c "import nvidia.cuda_nvrtc; print(nvidia.cuda_nvrtc.__file__)" 2>&1
-pip install nvidia-cuda-nvrtc --force-reinstall --no-cache-dir
-export LD_LIBRARY_PATH=$(python -c "import nvidia.cuda_nvrtc, os; print(os.path.dirname(nvidia.cuda_nvrtc.__file__)+'/lib')"):$LD_LIBRARY_PATH
-nvidia-smi   # driver + max supported CUDA
-python -c "import torch; print(torch.version.cuda)"
+  "vllm==0.23.0"
 
 for eval_dir in "${EVAL_DIRS[@]}"; do
   echo "=== Processing $eval_dir ==="
@@ -118,21 +97,16 @@ for eval_dir in "${EVAL_DIRS[@]}"; do
       [[ -f "$judge_output" ]] && resume="--resume"
 
       echo "  Running judge model: $model"
-      extra_args=()
-      if [[ "$model" == deepseek-ai/DeepSeek-V4-Flash* ]]; then
-        extra_args+=(--kv-cache-dtype fp8)
-      fi
 
       python "$ROOT/scripts/run_vllm_reasoning_judge.py" \
         "$prompt" \
         --output "$judge_output" \
         --model "$model" \
-        --tensor-parallel-size 4 \
+        --tensor-parallel-size 2 \
         --max-tokens 2048 \
         --max-model-len 4096 \
-        "${extra_args[@]}" \
         $resume
-      fi
+    fi
 
     if [[ -f "$scores" ]]; then
       echo "  Using existing score file: $scores"
@@ -145,21 +119,13 @@ for eval_dir in "${EVAL_DIRS[@]}"; do
     fi
   done
 
-  for existing_score in "$eval_dir"/judge_scores_*.jsonl; do
+  for existing_score in "$eval_dir"/judge_scores*.jsonl; do
     [[ -e "$existing_score" ]] || continue
     if [[ -z "${seen_score_files[$existing_score]:-}" ]]; then
       score_files+=("$existing_score")
       seen_score_files["$existing_score"]=1
     fi
   done
-
-  # if (( ${#score_files[@]} > 0 )); then
-  #   python "$CONSISTENCY_SCRIPT" \
-  #     --score-files "${score_files[@]}" \
-  #     --output "$eval_dir/judge_consistency.json"
-  # else
-  #   echo "  No judge score files produced for consistency comparison." >&2
-  # fi
 
   echo
 done

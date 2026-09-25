@@ -1493,3 +1493,108 @@ class AudioDeepfakeLLM(nn.Module):
             logits_list.append(curr_logits)
 
         return torch.cat(logits_list, dim=0)
+    
+    def compute_logits_for_completions_with_cls(self, samples, completion_ids):
+        """Same forward pass as compute_logits_for_completions, but also returns
+        MLP classification logits pooled from the BOS+prompt hidden states.
+
+        Returns:
+            completion_logits: [B, completion_len, vocab_size]
+            cls_logits: [B, num_classes] or None if no MLP adaptor is configured
+        """
+        raw_wav = samples["raw_wav"]
+        audio_attention_mask = samples.get("audio_attention_mask", None)
+        prompts = samples.get("prompt")
+        if prompts is None:
+            raise ValueError("Prompt must be provided")
+
+        prompt_list = prompts if isinstance(prompts, list) else [prompts]
+        has_opensmile_token = any("<OPENSMILE>" in str(p) for p in prompt_list)
+        opensmile_texts = None
+        if has_opensmile_token or self.use_opensmile:
+            if self.opensmile_extractor is None:
+                from speech_encoders.opensmile_features import OpenSMILETextExtractor
+                self.opensmile_extractor = OpenSMILETextExtractor()
+            opensmile_texts = self.extract_opensmile_text(raw_wav, audio_attention_mask)
+
+        speech_output, speech_lens = self.encode_speech(raw_wav, audio_attention_mask)
+        inputs_embeds, attention_mask = self.prompt_wrap(
+            speech_output, speech_lens, prompts,
+            multi_prompt=isinstance(prompts, list),
+            padding_side="right",
+            opensmile_texts=opensmile_texts,
+        )
+
+        device = inputs_embeds.device
+        batch_size = inputs_embeds.shape[0]
+        bos_token_id = (
+            self.tokenizer.bos_token_id
+            if self.tokenizer.bos_token_id is not None
+            else self.tokenizer.eos_token_id
+        )
+        bos = torch.full((batch_size, 1), bos_token_id, dtype=torch.long, device=device)
+        bos_embeds = self._get_text_embeds(bos)
+        completion_embeds = self._get_text_embeds(completion_ids.long())
+
+        full_embeds_list, full_attention_list, prompt_lens = [], [], []
+        for i in range(batch_size):
+            valid_len = attention_mask[i].sum().long().item()
+            real_prompt_embeds = inputs_embeds[i:i+1, :valid_len]
+            real_prompt_mask = attention_mask[i:i+1, :valid_len]
+            curr_completion = completion_embeds[i:i+1]
+
+            full_embeds = torch.cat([bos_embeds[i:i+1], real_prompt_embeds, curr_completion], dim=1)
+            full_attention = torch.cat(
+                [
+                    torch.ones((1, 1), dtype=real_prompt_mask.dtype, device=device),
+                    real_prompt_mask,
+                    torch.ones_like(completion_ids[i:i+1]),
+                ],
+                dim=1,
+            )
+            full_embeds_list.append(full_embeds)
+            full_attention_list.append(full_attention)
+            prompt_lens.append(1 + valid_len)  # BOS + real prompt
+
+        max_len = max(x.shape[1] for x in full_embeds_list)
+        padded_embeds, padded_attention = [], []
+        for emb, attn in zip(full_embeds_list, full_attention_list):
+            pad_len = max_len - emb.shape[1]
+            if pad_len > 0:
+                emb = torch.cat([emb, torch.zeros(1, pad_len, emb.shape[-1], dtype=emb.dtype, device=device)], dim=1)
+                attn = torch.cat([attn, torch.zeros(1, pad_len, dtype=attn.dtype, device=device)], dim=1)
+            padded_embeds.append(emb)
+            padded_attention.append(attn)
+
+        full_embeds = torch.cat(padded_embeds, dim=0)
+        full_attention = torch.cat(padded_attention, dim=0)
+
+        outputs = self.llm_model(
+            inputs_embeds=full_embeds,
+            attention_mask=full_attention,
+            return_dict=True,
+            output_hidden_states=self.use_mlp_adaptor,
+        )
+
+        completion_len = completion_ids.shape[1]
+        logits_list = []
+        for i in range(batch_size):
+            p_len = prompt_lens[i]
+            logits_list.append(outputs.logits[i:i+1, p_len - 1: p_len - 1 + completion_len, :])
+        completion_logits = torch.cat(logits_list, dim=0)
+
+        cls_logits = None
+        if self.use_mlp_adaptor:
+            last_hidden = outputs.hidden_states[-1]
+            pooled_list = []
+            for i in range(batch_size):
+                p_len = prompt_lens[i]
+                # Pool over BOS+prompt only — same convention as get_hidden_state_logits,
+                # so classification reflects the audio/prompt evidence, not the sampled completion.
+                pooled_list.append(
+                    self._mean_pool_last_hidden(last_hidden[i:i+1, :p_len, :], full_attention[i:i+1, :p_len])
+                )
+            pooled = torch.cat(pooled_list, dim=0)
+            cls_logits = self.mlp_adaptor(pooled.float())
+
+        return completion_logits, cls_logits

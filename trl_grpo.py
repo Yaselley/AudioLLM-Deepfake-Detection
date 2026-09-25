@@ -12,7 +12,29 @@ import torch
 from torch import nn
 
 from dataset import load_audio_file
-from grpo import get_log_probs
+
+def get_log_probs(logits, labels):
+    """
+    Compute log softmax for selected tokens only.
+
+    Args:
+        logits: (batch_size, seq_len, vocab_size)
+        labels: (batch_size, seq_len) - token IDs
+
+    Returns:
+        log_probs: (batch_size, seq_len) - log probabilities of selected tokens
+    """
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+    batch_size, seq_len, vocab_size = logits.shape
+
+    log_probs_flat = log_probs.view(-1, vocab_size)
+    labels_flat = labels.view(-1)
+
+    selected_log_probs = log_probs_flat.gather(1, labels_flat.unsqueeze(1)).squeeze(1)
+    selected_log_probs = selected_log_probs.view(batch_size, seq_len)
+
+    return selected_log_probs
 
 
 class AudioDeepfakeTRLModel(nn.Module):
@@ -88,6 +110,9 @@ class AudioDeepfakeTRLModel(nn.Module):
 
     def compute_logits_for_completions(self, samples, completion_ids):
         return self.audio_model.compute_logits_for_completions(samples, completion_ids)
+
+    def compute_logits_and_cls_for_completions(self, samples, completion_ids):
+        return self.audio_model.compute_logits_for_completions_with_cls(samples, completion_ids)
 
 
 class AudioGRPOTrainer(__import__("trl", fromlist=["GRPOTrainer"]).GRPOTrainer):
@@ -199,7 +224,7 @@ class AudioGRPOTrainer(__import__("trl", fromlist=["GRPOTrainer"]).GRPOTrainer):
             "audio_attention_mask": inputs["audio_attention_mask"],
             "prompt": inputs["prompt"],
         }
-        logits = model.compute_logits_for_completions(samples, inputs["completion_ids"])
+        logits, cls_logits = model.compute_logits_and_cls_for_completions(samples, inputs["completion_ids"])
         log_probs = get_log_probs(logits, inputs["completion_ids"])
         completion_mask = inputs["completion_mask"].float()
         advantages = inputs["advantages"]
@@ -209,15 +234,15 @@ class AudioGRPOTrainer(__import__("trl", fromlist=["GRPOTrainer"]).GRPOTrainer):
             old_log_probs = log_probs.detach()
         log_ratio = log_probs - old_log_probs
         ratio = torch.exp(log_ratio)
-        clipped_ratio = torch.clamp(
-            ratio, 1 - self.epsilon_low, 1 + self.epsilon_high
-        )
+        clipped_ratio = torch.clamp(ratio, 1 - self.epsilon_low, 1 + self.epsilon_high)
         per_token_loss = -torch.minimum(
             ratio * advantages.unsqueeze(1),
             clipped_ratio * advantages.unsqueeze(1),
         )
 
         if self.audio_beta:
+            # unchanged — uses the plain (no-cls) method since the frozen reference
+            # doesn't need a classification loss
             reference_model = model.audio_model
             current_state = {}
             for name, parameter in reference_model.named_parameters():
@@ -226,25 +251,32 @@ class AudioGRPOTrainer(__import__("trl", fromlist=["GRPOTrainer"]).GRPOTrainer):
                     parameter.data.copy_(self._reference_state_dict[name])
             try:
                 with torch.no_grad():
-                    reference_logits = model.compute_logits_for_completions(
-                        samples, inputs["completion_ids"]
-                    )
-                    reference_log_probs = get_log_probs(
-                        reference_logits, inputs["completion_ids"]
-                    )
+                    reference_logits = model.compute_logits_for_completions(samples, inputs["completion_ids"])
+                    reference_log_probs = get_log_probs(reference_logits, inputs["completion_ids"])
             finally:
                 for name, parameter in reference_model.named_parameters():
                     if name in current_state:
                         parameter.data.copy_(current_state[name])
             per_token_loss = per_token_loss + self.audio_beta * (
-                torch.exp(reference_log_probs - log_probs)
-                - (reference_log_probs - log_probs)
-                - 1
+                torch.exp(reference_log_probs - log_probs) - (reference_log_probs - log_probs) - 1
             )
 
-        loss = (per_token_loss * completion_mask).sum() / completion_mask.sum().clamp_min(1.0)
-        return loss / self.current_gradient_accumulation_steps
+        grpo_loss = (per_token_loss * completion_mask).sum() / completion_mask.sum().clamp_min(1.0)
 
+        loss = grpo_loss
+        if cls_logits is not None:
+            cls_targets = torch.tensor(
+                [model.audio_model._label_to_index(t) for t in inputs["text"]],
+                dtype=torch.long,
+                device=cls_logits.device,
+            )
+            cls_loss = torch.nn.functional.cross_entropy(cls_logits, cls_targets)
+            loss = loss + model.audio_model.mlp_loss_weight * cls_loss
+            if hasattr(self, "_metrics"):
+                mode = "eval" if self.control.should_evaluate else "train"
+                self._metrics[mode].setdefault("cls_loss", []).append(cls_loss.item())
+
+        return loss / self.current_gradient_accumulation_steps
 
 def make_audio_grpo_trainer(audio_model, **kwargs):
     """Build the TRL trainer and reject unsupported vLLM settings early."""
