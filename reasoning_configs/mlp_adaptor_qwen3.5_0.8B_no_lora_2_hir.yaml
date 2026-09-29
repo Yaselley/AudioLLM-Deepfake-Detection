@@ -5,15 +5,15 @@ model:
   audio_encoder_path: "/ds-slt/audio_weights/xlsr2_300m.pt"
   audio_encoder_type: "wav2vec2"
   audio_encoder_source: "fairseq"
-  freeze_audio_encoder: true
+  freeze_audio_encoder: false
 
-  lora: false
+  lora: true 
   lora_rank: 64
   lora_alpha: 16
   lora_dropout: 0.05
 
   mlp_adaptor: true
-  mlp_adaptor_only: true
+  mlp_adaptor_only: false
   mlp_hidden_dim: 768
   mlp_dropout: 0.1
   mlp_num_classes: 2

@@ -119,6 +119,12 @@ def _load_checkpoint_weights(model, checkpoint_dir: str, epoch: str, device: tor
                     model.audio_encoder.load_state_dict(fixed_state_dict, strict=False)
                 break
 
+    mlp = Path(checkpoint_dir) / f"mlp_adaptor_best.pt"
+
+    if model.use_mlp_adaptor and model.mlp_adaptor is not None and mlp.is_file():
+        logging.info("Loading MLP adaptor from %s", mlp)
+        model.mlp_adaptor.load_state_dict(torch.load(mlp, map_location="cpu"))
+
     lora_dir = os.path.join(checkpoint_dir, f"lora_{epoch}") if os.path.isdir(os.path.join(checkpoint_dir, f"lora_{epoch}")) else None
     if lora_dir is None:
         lora_dir = os.path.join(checkpoint_dir, "lora_best") if os.path.isdir(os.path.join(checkpoint_dir, "lora_best")) else None

@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=100G
 #SBATCH --cpus-per-task=1
-#SBATCH --time=24:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=logs/audiollm_train_%j.out
 #SBATCH --error=logs/audiollm_train_%j.err
 #SBATCH --container-image=/enroot/dfki_berlin_speech_shared/universal_df.sqsh
