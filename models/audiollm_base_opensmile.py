@@ -1586,16 +1586,6 @@ class AudioDeepfakeLLM(nn.Module):
         cls_logits = None
         if self.use_mlp_adaptor:
             last_hidden = outputs.hidden_states[-1]
-            pooled_list = []
-            for i in range(batch_size):
-                # Pool over BOS + prompt + completion (the full un-padded sequence)
-                end = prompt_lens[i] + completion_len
-                pooled_list.append(
-                    self._mean_pool_last_hidden(
-                        last_hidden[i:i+1, :end, :],
-                        full_attention[i:i+1, :end],
-                    )
-                )
-            pooled = torch.cat(pooled_list, dim=0)
-            cls_logits = self.mlp_adaptor(pooled.float())
+            pooled = self._mean_pool_last_hidden(last_hidden, full_attention)
+            cls_logits = self.mlp_adaptor(pooled.float())    
         return completion_logits, cls_logits
