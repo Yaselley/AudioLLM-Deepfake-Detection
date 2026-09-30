@@ -111,9 +111,10 @@ class AudioDeepfakeTRLModel(nn.Module):
     def compute_logits_for_completions(self, samples, completion_ids):
         return self.audio_model.compute_logits_for_completions(samples, completion_ids)
 
-    def compute_logits_and_cls_for_completions(self, samples, completion_ids):
-        return self.audio_model.compute_logits_for_completions_with_cls(samples, completion_ids)
-
+    def compute_logits_and_cls_for_completions(self, samples, completion_ids, completion_mask):
+        return self.audio_model.compute_logits_for_completions_with_cls(
+            samples, completion_ids, completion_mask
+        )
 
 class AudioGRPOTrainer(__import__("trl", fromlist=["GRPOTrainer"]).GRPOTrainer):
     """GRPOTrainer with audio-aware rollout and policy log-prob computation."""
@@ -224,7 +225,7 @@ class AudioGRPOTrainer(__import__("trl", fromlist=["GRPOTrainer"]).GRPOTrainer):
             "audio_attention_mask": inputs["audio_attention_mask"],
             "prompt": inputs["prompt"],
         }
-        logits, cls_logits = model.compute_logits_and_cls_for_completions(samples, inputs["completion_ids"])
+        logits, cls_logits = model.compute_logits_and_cls_for_completions(samples, inputs["completion_ids"], inputs["completion_mask"])
         log_probs = get_log_probs(logits, inputs["completion_ids"])
         completion_mask = inputs["completion_mask"].float()
         advantages = inputs["advantages"]

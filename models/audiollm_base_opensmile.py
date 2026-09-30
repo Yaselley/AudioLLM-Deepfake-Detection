@@ -1494,9 +1494,9 @@ class AudioDeepfakeLLM(nn.Module):
 
         return torch.cat(logits_list, dim=0)
     
-    def compute_logits_for_completions_with_cls(self, samples, completion_ids):
+    def compute_logits_for_completions_with_cls(self, samples, completion_ids, completion_mask):
         """Same forward pass as compute_logits_for_completions, but also returns
-        MLP classification logits pooled from the BOS+prompt hidden states.
+        MLP classification logits pooled from the BOS+prompt+completion hidden states.
 
         Returns:
             completion_logits: [B, completion_len, vocab_size]
@@ -1548,13 +1548,13 @@ class AudioDeepfakeLLM(nn.Module):
                 [
                     torch.ones((1, 1), dtype=real_prompt_mask.dtype, device=device),
                     real_prompt_mask,
-                    torch.ones_like(completion_ids[i:i+1]),
+                    completion_mask[i:i+1].to(real_prompt_mask.dtype),   # was ones_like(...)
                 ],
                 dim=1,
             )
             full_embeds_list.append(full_embeds)
             full_attention_list.append(full_attention)
-            prompt_lens.append(1 + valid_len)  # BOS + real prompt
+            prompt_lens.append(1 + valid_len)
 
         max_len = max(x.shape[1] for x in full_embeds_list)
         padded_embeds, padded_attention = [], []
@@ -1567,8 +1567,7 @@ class AudioDeepfakeLLM(nn.Module):
             padded_attention.append(attn)
 
         full_embeds = torch.cat(padded_embeds, dim=0)
-        full_attention = torch.cat(padded_attention, dim=0)
-
+        full_attention = torch.cat(padded_attention, dim=0)      
         outputs = self.llm_model(
             inputs_embeds=full_embeds,
             attention_mask=full_attention,

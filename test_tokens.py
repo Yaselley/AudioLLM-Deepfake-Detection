@@ -120,7 +120,9 @@ def _load_checkpoint_weights(model, checkpoint_dir: str, epoch: str, device: tor
                 break
 
     mlp = Path(checkpoint_dir) / f"mlp_adaptor_best.pt"
-
+    if model.use_mlp_adaptor:
+        if not mlp.is_file():
+            raise FileNotFoundError(f"MLP adaptor not found: {mlp}")
     if model.use_mlp_adaptor and model.mlp_adaptor is not None and mlp.is_file():
         logging.info("Loading MLP adaptor from %s", mlp)
         model.mlp_adaptor.load_state_dict(torch.load(mlp, map_location="cpu"))
@@ -300,6 +302,14 @@ def _filter_remaining_data(
 
     return filtered_path
 
+def completion_mask_from_ids(ids, pad_id, eos_id):
+    """1 for real completion tokens (up to and including the first EOS), 0 after."""
+    mask = ids.ne(pad_id).long()
+    if eos_id is not None:
+        eos = ids.eq(eos_id)
+        after_eos = (eos.cumsum(dim=1) - eos.long()) > 0
+        mask = mask * (~after_eos).long()
+    return mask
 
 def evaluate_split(
     model,
@@ -327,10 +337,17 @@ def evaluate_split(
         ground_truth_texts = batch["text"]
 
         if use_mlp_adaptor:
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                with torch.no_grad():
-                    pooled, mlp_logits = model.get_hidden_state_logits(samples, prompts=batch["prompt"])
-            probs = torch.softmax(mlp_logits.float(), dim=-1)
+            with torch.no_grad(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                _, completion_ids, _ = model.generate(
+                    samples, generate_cfg, prompts=batch["prompt"], return_outputs=True
+                )
+                completion_mask = completion_mask_from_ids(
+                    completion_ids, model.tokenizer.pad_token_id, model.tokenizer.eos_token_id
+                )
+                _, cls_logits = model.compute_logits_for_completions_with_cls(
+                    samples, completion_ids, completion_mask
+                )
+            probs = torch.softmax(cls_logits.float(), dim=-1)
             # For the trained MLP head, class 0 = real/bonafide and class 1 = fake/spoof,
             # matching the label mapping in _label_to_index() in the model.
             probs_real = probs[:, 0]
