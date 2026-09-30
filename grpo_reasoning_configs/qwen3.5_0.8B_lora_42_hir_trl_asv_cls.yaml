@@ -59,4 +59,4 @@ train:
     log_freq: 50
 
 
-output_dir: "output_grpo_trl/lora_42_reasoning_cls_both_stage2_output"
+output_dir: "output_grpo_trl/lora_42_reasoning_cls_full_both_stage2_output"
