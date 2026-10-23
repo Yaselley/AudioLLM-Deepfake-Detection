@@ -213,7 +213,7 @@ python scripts/evaluate_reasoning_judge.py \
   --prepare-only
 
 # 2. Run a judge (Groq API or local vLLM)
-python scripts/run_groq_reasoning_judge.py \
+python scripts/run_vllm_reasoning_judge.py \
   output/evals/judge_prompts.json \
   --model openai/gpt-oss-120b \
   --output output/evals/judge_raw.jsonl
@@ -227,8 +227,7 @@ python scripts/evaluate_reasoning_judge.py \
 
 Judges score **Correctness**, **Reasoning Quality**, **Comprehensiveness**, and
 **Logic** on a 1–10 scale. The thesis uses `gpt-oss-120B`, `gemma-4-31B`, and
-`Selene-1-Llama-3.3-70B`; `scripts/compare_three_judge_consistency.py` aggregates their
-agreement. `scripts/prepare_reasoning_judge_all.sh` batches preparation over a directory
+`Selene-1-Llama-3.3-70B`; `scripts/prepare_reasoning_judge_all.sh` batches preparation over a directory
 tree of evaluation runs.
 
 ## Selected results
@@ -247,12 +246,9 @@ thesis.
 
 Main findings:
 
-- Reasoning-before-answer supervision transfers better than answer-then-explanation,
-  especially out of domain.
+- Reasoning-before-answer supervision transfers better than answer-then-explanation.
 - Neither a larger LLM nor LoRA consistently improves over a frozen 0.8B LLM.
 - GRPO after SFT is effective with LoRA and unreliable with a frozen LLM.
-- More benchmark diversity in the reasoning mixture improves average performance even
-  when in-domain HIR-SDD accuracy drops.
 
 ## Notes
 
