@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train baseline AudioLLM (Whisper/Wav2Vec + Qwen, optional OpenSmile via config)."""
+"""Train the AudioLLM (XLS-R + Qwen3.5) with supervised fine-tuning."""
 
 from __future__ import annotations
 

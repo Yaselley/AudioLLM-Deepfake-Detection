@@ -38,7 +38,7 @@ set_seed(42)
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.audiollm_base_opensmile import AudioDeepfakeLLM
+from models.audiollm import AudioDeepfakeLLM
 from dataset import AudioDeepfakeDataset
 
 
@@ -60,52 +60,27 @@ def load_model(checkpoint_dir, epoch, device, compile_model=False, use_amp=False
     
     # Initialize Model
     model_cfg = config["model"]
-    # model = AudioDeepfakeLLM(
-    #     llm_path=model_cfg["llm_path"],
-    #     llm_type=model_cfg.get("llm_type", "qwen2"),
-    #     audio_encoder_path=model_cfg["audio_encoder_path"],
-    #     audio_encoder_type=model_cfg.get("audio_encoder_type", "whisper"),
-    #     audio_encoder_source=model_cfg.get("audio_encoder_source", "huggingface"),
-    #     freeze_audio_encoder=model_cfg.get("freeze_audio_encoder", True),
-    #     speechtokenizer_num_layers=model_cfg.get("speechtokenizer_num_layers", 8),
-    #     speechtokenizer_codebook_size=model_cfg.get("speechtokenizer_codebook_size", 1024),
-    #     lora=model_cfg.get("lora", True),
-    #     lora_rank=model_cfg.get("lora_rank", 64),
-    #     lora_alpha=model_cfg.get("lora_alpha", 16),
-    #     lora_dropout=model_cfg.get("lora_dropout", 0.05),
-    #     special_tokens=model_cfg.get("special_tokens", []),
-    #     device_8bit=0 
-    # )
-    
+
     model = AudioDeepfakeLLM(
         llm_path=model_cfg["llm_path"],
-        llm_type=model_cfg.get("llm_type", "qwen2"),
+        llm_type=model_cfg.get("llm_type", "qwen3.5"),
         audio_encoder_path=model_cfg.get("audio_encoder_path", None),
-        audio_encoder_type=model_cfg.get("audio_encoder_type", "whisper"),
-        audio_encoder_source=model_cfg.get("audio_encoder_source", "huggingface"),
+        audio_encoder_type=model_cfg.get("audio_encoder_type", "wav2vec2"),
+        audio_encoder_source=model_cfg.get("audio_encoder_source", "fairseq"),
         freeze_audio_encoder=model_cfg.get("freeze_audio_encoder", True),
         lora=model_cfg.get("lora", True),
         lora_rank=model_cfg.get("lora_rank", 64),
         lora_alpha=model_cfg.get("lora_alpha", 16),
         lora_dropout=model_cfg.get("lora_dropout", 0.05),
+        mlp_adaptor=model_cfg.get("mlp_adaptor", False),
+        mlp_hidden_dim=model_cfg.get("mlp_hidden_dim", 768),
+        mlp_dropout=model_cfg.get("mlp_dropout", 0.1),
+        mlp_num_classes=model_cfg.get("mlp_num_classes", 2),
+        mlp_loss_weight=model_cfg.get("mlp_loss_weight", 0.5),
         special_tokens=model_cfg.get("special_tokens", []),
         device_8bit=0,
-        # SpeechTokenizer parameters
-        speechtokenizer_num_layers=model_cfg.get("speechtokenizer_num_layers", 8),
-        speechtokenizer_codebook_size=model_cfg.get("speechtokenizer_codebook_size", 1024),
-        speechtokenizer_return_discrete=model_cfg.get("speechtokenizer_return_discrete", True),  # ADD THIS LINE
-        dac_num_codebooks=model_cfg.get("dac_num_codebooks", 12),
-        dac_codebook_size=model_cfg.get("dac_codebook_size", 1024),
-        dac_model_type=model_cfg.get("dac_model_type", "16khz"),
-        dac_return_discrete=model_cfg.get("dac_return_discrete", True),
-        # SQ-Codec parameters
-        sqcodec_num_quantizers=model_cfg.get("sqcodec_num_quantizers", 4),
-        sqcodec_num_levels=model_cfg.get("sqcodec_num_levels", 4096),
-        use_weighted_layer_sum = model_cfg.get("use_weighted_layer_sum", False),
-        weighted_layer_norm = model_cfg.get("weighted_layer_norm", "none"),
-
-        use_opensmile=model_cfg.get("use_opensmile", False),
-        opensmile_only=model_cfg.get("opensmile_only", False),
+        use_weighted_layer_sum=model_cfg.get("use_weighted_layer_sum", False),
+        weighted_layer_norm=model_cfg.get("weighted_layer_norm", "none"),
     )
     
     # Load Projector Weights

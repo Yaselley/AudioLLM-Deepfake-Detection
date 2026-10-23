@@ -36,7 +36,7 @@ train:
   epochs: 5
   lr: 1e-4          # Global fallback LR
   lr_adapter: 1e-5
-  lr_audio: 1e-6    # Lower LR for full fine-tuning of Whisper
+  lr_audio: 1e-6    # Lower LR for full fine-tuning of XLS-R
   lr_lora: 1e-5     # Standard LoRA LR
   num_workers: 4
   seed: 2

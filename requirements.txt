@@ -1,4 +1,4 @@
-# Core training & evaluation (AudioLLM + Whisper/Wav2Vec + Qwen)
+# Core training & evaluation (XLS-R + Qwen3.5)
 torch>=2.1.0
 torchaudio>=2.1.0
 transformers>=4.40.0
@@ -16,6 +16,5 @@ tqdm>=4.66.0
 soundfile>=0.12.0
 librosa>=0.10.0
 
-# Optional: Qwen-Omni / ms-swift training (see requirements.swift.txt)
-# ms_swift>=3.9.0
-# vllm>=0.10.0
+# Optional: GRPO post-training (TRL)
+trl>=0.12.0

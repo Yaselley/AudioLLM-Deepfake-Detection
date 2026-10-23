@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from dataset import AudioDeepfakeDataset
-from models.audiollm_base_opensmile import AudioDeepfakeLLM
+from models.audiollm import AudioDeepfakeLLM
 
 
 def init_distributed() -> tuple[torch.device, bool]:
@@ -100,10 +100,10 @@ def build_model(model_cfg: dict, *, force_lora: bool | None = None) -> AudioDeep
     lora = force_lora if force_lora is not None else model_cfg.get("lora", True)
     model = AudioDeepfakeLLM(
         llm_path=model_cfg["llm_path"],
-        llm_type=model_cfg.get("llm_type", "qwen2"),
+        llm_type=model_cfg.get("llm_type", "qwen3.5"),
         audio_encoder_path=model_cfg.get("audio_encoder_path"),
-        audio_encoder_type=model_cfg.get("audio_encoder_type", "whisper"),
-        audio_encoder_source=model_cfg.get("audio_encoder_source", "huggingface"),
+        audio_encoder_type=model_cfg.get("audio_encoder_type", "wav2vec2"),
+        audio_encoder_source=model_cfg.get("audio_encoder_source", "fairseq"),
         freeze_audio_encoder=model_cfg.get("freeze_audio_encoder", True),
         use_weighted_layer_sum=model_cfg.get("use_weighted_layer_sum", False),
         weighted_layer_norm=model_cfg.get("weighted_layer_norm", "none"),
@@ -118,8 +118,6 @@ def build_model(model_cfg: dict, *, force_lora: bool | None = None) -> AudioDeep
         mlp_loss_weight=model_cfg.get("mlp_loss_weight", 0.5),
         special_tokens=model_cfg.get("special_tokens", []),
         device_8bit=0,
-        use_opensmile=model_cfg.get("use_opensmile", False),
-        opensmile_only=model_cfg.get("opensmile_only", False),
     )
     if model_cfg.get("mlp_adaptor_only", False):
         for parameter in model.parameters():

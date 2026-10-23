@@ -27,7 +27,7 @@ echo "Loading reasoning checkpoint: ${CHECKPOINT} (${CHECKPOINT_EPOCH})"
 echo "Writing adaptor checkpoint to: ${OUTPUT_DIR}"
 
 pip install -r requirements.txt
-python3 train_tokens_opensmile_stage2.py \
+python3 train_continue.py \
 	--config "${CONFIG}" \
 	--pretrained_checkpoint "${CHECKPOINT}" \
 	--checkpoint_epoch "${CHECKPOINT_EPOCH}" \

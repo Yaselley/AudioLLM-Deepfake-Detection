@@ -23,4 +23,4 @@ OUTPUT_DIR=${CHECKPOINT%/}/lora_240_reasoning_stage2_output
 echo "Running with config: ${CONFIG}"
 
 pip install -r requirements.txt
-python3 train_tokens_opensmile_stage2.py --config "${CONFIG}" --pretrained_checkpoint "${CHECKPOINT}" --output_dir "${OUTPUT_DIR}"
+python3 train_continue.py --config "${CONFIG}" --pretrained_checkpoint "${CHECKPOINT}" --output_dir "${OUTPUT_DIR}"

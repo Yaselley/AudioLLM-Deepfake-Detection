@@ -31,11 +31,9 @@ model:
   mlp_num_classes: 2
   mlp_loss_weight: 0.5
   special_tokens: []
-  audio_encoder_path: openai/whisper-large-v3
-  audio_encoder_type: whisper
-  audio_encoder_source: huggingface
+  audio_encoder_path: /path/to/xlsr2_300m.pt
+  audio_encoder_type: wav2vec2
+  audio_encoder_source: fairseq
   freeze_audio_encoder: false
-  use_opensmile: false
-  opensmile_only: false
 
 output_dir: outputs/mlp_adaptor_example
